@@ -9,9 +9,9 @@ A real-time WebGL2 desert in the browser. A cloaked wanderer crosses endless dun
 | Input | Action |
 | --- | --- |
 | `W` `A` `S` `D` | Walk (camera-relative) |
-| `Shift` | Run (rhythm in the sand can draw a worm) |
+| `Shift` | Run (rhythm in the sand draws worms; keep it up and one will hunt you) |
 | Drag / mouse wheel | Look / zoom |
-| `E` | Plant a thumper, then run: its rhythm calls a worm |
+| `E` | Plant a thumper, then run: its rhythm calls a worm, and anyone standing where the mouth breaks the surface is swallowed |
 | `C` | Toggle the cinematic camera |
 | `T` or the slider | Time of day |
 | `G` | Summon or dismiss a sandstorm |
@@ -27,7 +27,7 @@ On touch screens, the left thumb walks with a virtual joystick and dragging on t
 
 - **Terrain:** analytic dunes evaluated identically in JS and GLSL, with per-pixel normals, wind ripples, glints, ray-marched dune self-shadowing and a 64 m deformation field for footprints and slide marks.
 - **Atmosphere:** height-based haze, a physically motivated sky, cirrus with drifting cloud shadows, a ringed gas giant, a rising ice giant, moons (one casting a transit shadow), a comet, meteors and the Milky Way.
-- **Character:** a rigged model retargeted from motion-capture walk, run and idle cycles, with world-locked feet on the terrain (capture-shaped swing arcs, heel strike and toe roll), look-at, a storm brace, and a simulated Verlet cloth cloak that drapes over the head-wrap.
+- **Character:** a rigged model retargeted from motion-capture walk, run and idle cycles, with world-locked feet on the terrain (capture-shaped swing arcs, heel strike and toe roll), look-at, a storm brace, and a simulated Verlet cloth cloak whose upper edge is fitted at load time as a rigid shell over the model's own head-wrap, so only the cloth below it moves.
 - **Sandworm:** a continuous procedural skin (plated rings, a three-lobed mouth that flares open as it surfaces, rings of crystal teeth) rebuilt every frame along the trail its head carves through the sand, leaving a fading ridge of churned sand behind it.
 - **Sand:** wind lofts grains off dune crests and they run down the slip faces; footsteps press real prints and set off small avalanches.
 - **Events:** sandworm encounters (sand waves, vertical rises, harvester attacks with carryall rescues, close encounters, rare breaches, and thumpers that call a worm to swallow them), ornithopter fly-bys, dust devils, spice blows and a full sandstorm cycle.
