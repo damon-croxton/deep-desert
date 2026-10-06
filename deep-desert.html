@@ -71,7 +71,7 @@ canvas#c:active{cursor:grabbing}
 <div id="stats" class="hud"></div>
 <div id="help" class="hud">
   <span><kbd>WASD</kbd>walk</span><span><kbd>Shift</kbd>run</span><span><kbd>Drag</kbd>look</span><span><kbd>Wheel</kbd>zoom</span>
-  <span><kbd>C</kbd>cinematic</span><span><kbd>T</kbd>time</span><span><kbd>L</kbd>letterbox</span><span><kbd>Q</kbd>quality</span><span><kbd>G</kbd>storm</span><span><kbd>M</kbd>sound</span><span><kbd>H</kbd>hide</span>
+  <span><kbd>C</kbd>cinematic</span><span><kbd>T</kbd>time</span><span><kbd>L</kbd>letterbox</span><span><kbd>Q</kbd>quality</span><span><kbd>E</kbd>thumper</span><span><kbd>G</kbd>storm</span><span><kbd>M</kbd>sound</span><span><kbd>H</kbd>hide</span>
 </div>
 <div id="tod" class="hud"><label for="todRange">Time of day · <b id="todName">Golden hour</b></label><input id="todRange" type="range" min="0" max="1" step="0.001" value="0.66"></div>
 <div id="toast" class="hud"></div>
@@ -143,7 +143,14 @@ function terrainCore(x, z, detail) {
   }
   return h;
 }
-const terrainH = (x, z) => terrainCore(x, z, true);
+// worm scars (mirrors wormScar() in GLSL so feet and props stay on the sand)
+const SCAR_JS = [];
+function scarH(x, z) {
+  let h = 0;
+  for (let i = 0; i < SCAR_JS.length; i++) { const s = SCAR_JS[i]; if (s.z <= 0) continue; const dx = x - s.x, dz = z - s.y; h += s.z * Math.exp(-(dx * dx + dz * dz) / 2400); }
+  return h;
+}
+const terrainH = (x, z) => terrainCore(x, z, true) + scarH(x, z);
 const CLOUD_ALT = 8500;
 function fbm2JS(x, y) { let s = 0, a = 0.5; for (let i = 0; i < 5; i++) { s += a * vnoise(x, y); x = x * 2.07 + 5.3; y = y * 2.07 + 1.7; a *= 0.5; } return s; }
 function cloudDensityJS(wx, wz, time, wind, cover) {
@@ -205,13 +212,25 @@ float duneProfile(float u){
   float t = (p-0.72)/0.28; return (1.0-t)*(1.0-t);
 }
 uniform vec4 uWormB; uniform vec2 uWormD;
+uniform vec4 uScar[20];
+float wormScar(vec2 p){
+  // churned ridge left along a worm's path, fading over a couple of minutes
+  float h = 0.0;
+  for (int i = 0; i < 20; i++){
+    if (uScar[i].z <= 0.0) continue;
+    vec2 d = p - uScar[i].xy;
+    h += uScar[i].z * exp(-dot(d, d) / 2400.0);
+  }
+  return h;
+}
 float wormBulge(vec2 p){
-  if (uWormB.z <= 0.0) return 0.0;
+  float sc = wormScar(p);
+  if (uWormB.z <= 0.0) return sc;
   vec2 d = p - uWormB.xy;
   float along = dot(d, uWormD), across = dot(d, vec2(-uWormD.y, uWormD.x));
   float r2 = uWormB.w*uWormB.w;
   float lng = along < 0.0 ? exp(along/320.0) : exp(-along*along/r2);
-  return uWormB.z * exp(-across*across/(r2*0.55)) * lng;
+  return uWormB.z * exp(-across*across/(r2*0.55)) * lng + sc;
 }
 float terrainCore(vec2 p, out float prof, bool detail){
   float wx = vnoise(p*0.0035) - 0.5;
@@ -425,6 +444,8 @@ const SH = {
   uCloudCover: { value: 0.44 },
   uCloudSun: { value: new V3(1, 1, 1) },
   uWormD: { value: new THREE.Vector2(1, 0) },
+  uScar: { value: Array.from({ length: 20 }, () => new THREE.Vector4()) },
+  uThump: { value: new THREE.Vector4(0, 0, -99, 0) },
 };
 const KEY_UNIFORMS_GLSL = `uniform vec3 uKeyDir; uniform vec3 uKeyColor; uniform vec3 uAmbSky; uniform vec3 uAmbGround; uniform float uTime; uniform vec3 uWind; uniform float uGust;`;
 
@@ -818,6 +839,7 @@ const terrainMat = new THREE.ShaderMaterial({
   fragmentShader: NOISE_GLSL + CLOUD_GLSL + HAZE_GLSL + KEY_UNIFORMS_GLSL + SHADOW_GLSL + /* glsl */`
     uniform float uGridR;
     uniform sampler2D uDeform; uniform vec3 uDeformO;
+    uniform vec4 uThump;
     varying vec3 vWorld;
     float ripple(vec2 p){
       vec2 w = vec2(vnoise(p*0.33), vnoise(p*0.33 + vec2(5.2, 1.3))) - 0.5;
@@ -855,6 +877,13 @@ const terrainMat = new THREE.ShaderMaterial({
         vec2 mp = p.xz*0.17 + vec2(13.0, 7.0) + (vnoise(p.xz*0.05) - 0.5)*1.5;
         float m0 = ripple(mp), m1 = ripple(mp + vec2(me*0.17, 0.0)), m2 = ripple(mp + vec2(0.0, me*0.17));
         g += vec2(m1 - m0, m2 - m0) * (0.028 / me) * mf * (1.0 - prof*0.6);
+      }
+      // a thumper's pulses ripple out through the sand
+      if (uThump.w > 0.0){
+        vec2 dv = p.xz - uThump.xy; float dd = length(dv) + 1e-3;
+        float age = uTime - uThump.z, front = age * 16.0;
+        float ring = sin((dd - front) * 2.4) * exp(-abs(dd - front) * 0.35) * exp(-age * 1.2) * exp(-dd * 0.012);
+        g += (dv / dd) * ring * 0.22 * uThump.w;
       }
       // footprints, slide marks: relight from the deformation heightfield
       float trodden = 0.0;
@@ -2692,9 +2721,9 @@ function wormMeshUpdate(W) {
     if (k === LIP_RINGS - 1) head = { C: F.C.clone(), T: F.T.clone(), U: F.U.clone(), N: F.N.clone() };
     for (let j = 0; j < WORM_SIDES; j++) {
       const th = j / WORM_SIDES * Math.PI * 2, ct = Math.cos(th), st = Math.sin(th);
-      const lobe = Math.cos(3 * th);
-      const r = rg.r * (1 + rg.lip * 0.22 * lobe);
-      const fwdExt = rg.lip * (4 + 7 * (0.5 + 0.5 * lobe));
+      const lobe = Math.cos(3 * th), mo = W.mouth ?? 0;
+      const r = rg.r * (1 + rg.lip * (0.22 + 0.42 * mo) * lobe + rg.lip * 0.3 * mo);
+      const fwdExt = rg.lip * (4 + (7 + 16 * mo) * (0.5 + 0.5 * lobe));
       const o = (k * WORM_SIDES + j) * 3;
       pos[o] = F.C.x + (F.U.x * ct + F.N.x * st) * r + F.T.x * fwdExt;
       pos[o + 1] = F.C.y + (F.U.y * ct + F.N.y * st) * r + F.T.y * fwdExt;
@@ -2705,7 +2734,7 @@ function wormMeshUpdate(W) {
   // throat + teeth ride rigidly on the head frame
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(1, 1, 1), up = new V3(0, 1, 0);
   for (let k = 0; k < THROAT_RINGS; k++) {
-    const t = k / (THROAT_RINGS - 1), back = -12 + t * 60, r = WORM_R * (1.05 - 0.45 * t);
+    const t = k / (THROAT_RINGS - 1), back = -12 + t * 60, r = WORM_R * (1.05 - 0.45 * t) * (1 + 0.25 * (W.mouth ?? 0) * (1 - t));
     for (let j = 0; j < WORM_SIDES; j++) {
       const th = j / WORM_SIDES * Math.PI * 2, rr = r * (1 + (1 - t) * 0.18 * Math.cos(3 * th));
       const o = (k * WORM_SIDES + j) * 3;
@@ -2715,7 +2744,7 @@ function wormMeshUpdate(W) {
   throatGeo.attributes.position.needsUpdate = true; throatGeo.computeVertexNormals();
   let n = 0;
   for (let k = 0; k < TOOTH_RINGS; k++) {
-    const back = -6 + k * 7.5, r = WORM_R * (0.98 - 0.07 * k);
+    const back = -6 + k * 7.5, r = WORM_R * (0.98 - 0.07 * k) * (1 + 0.22 * (W.mouth ?? 0) * (1 - k / TOOTH_RINGS));
     for (let j = 0; j < TOOTH_PER; j++) {
       const th = (j + (k % 2) * 0.5) / TOOTH_PER * Math.PI * 2;
       const radial = head.U.clone().multiplyScalar(Math.cos(th)).addScaledVector(head.N, Math.sin(th));
@@ -2735,6 +2764,72 @@ const wormState = { phase: 'idle', type: null, t: 0, next: 24, stage: '', trail:
   burstA: 0, burstB: 0, burstPosA: new V3(), burstPosB: new V3(), freeze: false, shake: 0, gustBoost: 0, noise: 0,
   lastType: '', lastClose: -999, queue: ['rise'], az: 0, center: new V3(), arcH: 0, cam: 0 };
 const carry = { state: 'hover', t: 0, dock: 0, lift: 0 };
+
+// ---- Thumper: a spring-driven stake that hammers the sand and calls the worm ----
+const thumper = (() => {
+  const g = new THREE.Group();
+  const metal = new THREE.MeshStandardMaterial({ color: 0x4c463f, roughness: 0.42, metalness: 0.85 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x24201c, roughness: 0.6, metalness: 0.6 });
+  const wrapM = new THREE.MeshStandardMaterial({ color: 0x7c6247, roughness: 0.95 });
+  const add = (geo, mat, x, y, z, rx = 0, rz = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx, 0, rz); m.castShadow = true; m.receiveShadow = true; g.add(m); return m; };
+  add(new THREE.CylinderGeometry(0.075, 0.1, 1.5, 18), metal, 0, 0.75, 0);
+  add(new THREE.ConeGeometry(0.1, 0.55, 14), dark, 0, -0.27, 0, Math.PI);
+  for (let k = 0; k < 3; k++) { const a = k / 3 * Math.PI * 2; const leg = add(new THREE.CylinderGeometry(0.018, 0.022, 0.75, 8), dark, Math.sin(a) * 0.16, 0.3, Math.cos(a) * 0.16); leg.rotation.set(Math.cos(a) * 0.45, 0, -Math.sin(a) * 0.45); }
+  add(new THREE.CylinderGeometry(0.15, 0.12, 0.34, 18), metal, 0, 1.52, 0);
+  add(new THREE.TorusGeometry(0.155, 0.02, 8, 24), dark, 0, 1.69, 0, Math.PI / 2);
+  for (const y of [0.55, 0.95]) add(new THREE.CylinderGeometry(0.093, 0.093, 0.16, 18), wrapM, 0, y, 0);
+  add(new THREE.CylinderGeometry(0.028, 0.028, 0.95, 10), metal, 0, 2.1, 0);
+  const hammer = new THREE.Group(); hammer.position.y = 1.86; g.add(hammer);
+  const hm = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 0.26, 20), dark); hm.castShadow = true; hammer.add(hm);
+  const hr = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.02, 6, 24), metal); hr.rotation.x = Math.PI / 2; hammer.add(hr);
+  const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.03, 10, 8), new THREE.MeshStandardMaterial({ color: 0x110000, emissive: 0xff2a10, emissiveIntensity: 0 }));
+  lamp.position.set(0.15, 1.56, 0.04); g.add(lamp);
+  g.visible = false; scene.add(g);
+  return { g, hammer, lamp, active: false, t: 0, pos: new V3(), lastThump: 0, flee: 0, called: false, sink: 0 };
+})();
+function plantThumper(t) {
+  const T = thumper;
+  if (T.active || wormState.phase !== 'idle') { toast(T.active ? 'The thumper is already calling' : 'Wait — a worm is already moving'); return; }
+  const fw = hero.forward();
+  T.pos.set(hero.pos.x + fw.x * 1.4, 0, hero.pos.z + fw.z * 1.4);
+  T.pos.y = terrainH(T.pos.x, T.pos.z);
+  T.g.position.copy(T.pos); T.g.rotation.y = Math.random() * 6.28; T.g.visible = true;
+  T.active = true; T.t = 0; T.flee = 1; T.called = false; T.sink = 0; T.lastThump = 0;
+  wormState.next = 1e9;
+  toast('Thumper planted · run');
+}
+function updateThumper(dt, t) {
+  const T = thumper;
+  if (!T.active) { SH.uThump.value.w = damp(SH.uThump.value.w, 0, 2, dt); return; }
+  T.t += dt;
+  // plant: drive the stake into the sand
+  const plant = smooth(0, 0.5, T.t);
+  T.g.position.y = T.pos.y + (1 - plant) * 0.7 - T.sink;
+  // spring cycle: wind the hammer up slowly, release it hard
+  const period = 1.45, u = (T.t % period) / period;
+  const raise = u < 0.82 ? smooth(0, 0.82, u) : 1 - smooth(0.82, 0.9, u);
+  T.hammer.position.y = 1.86 + raise * 0.42;
+  T.lamp.material.emissiveIntensity = u > 0.82 && u < 0.92 ? 12 : 1.5;
+  const cyc = Math.floor(T.t / period);
+  if (T.t > 0.6 && cyc !== T.lastThump && !T.swallowed) {
+    T.lastThump = cyc;
+    SH.uThump.value.set(T.pos.x, T.pos.z, t, 1);
+    spawnPuffRing(T.pos);
+    audioThump(T.pos);
+  }
+  // after a while the worm answers
+  if (!T.called && T.t > 8 && wormState.phase === 'idle') { T.called = true; startWorm('thumper', t); }
+  if (T.swallowed) { T.sink += dt * 12; if (T.sink > 6) { T.active = false; T.g.visible = false; T.swallowed = false; wormState.next = t + 70; } }
+}
+function spawnPuffRing(p) {
+  for (let k = 0; k < 18; k++) {
+    const i = puffHead; puffHead = (puffHead + 1) % PUFF_N;
+    const a = k / 18 * Math.PI * 2 + Math.random() * 0.3;
+    puffPos[i * 3] = p.x + Math.cos(a) * 0.25; puffPos[i * 3 + 1] = p.y + 0.02; puffPos[i * 3 + 2] = p.z + Math.sin(a) * 0.25;
+    puffVel[i * 3] = Math.cos(a) * (1.4 + Math.random()); puffVel[i * 3 + 1] = 0.2 + Math.random() * 0.4; puffVel[i * 3 + 2] = Math.sin(a) * (1.4 + Math.random());
+    puffMax[i] = 0.8 + Math.random() * 0.8; puffLife[i] = 1; puffSize[i] = 0.05 + Math.random() * 0.05;
+  }
+}
 
 // Dust devils wander the middle distance
 const DEVILS = [0, 1, 2, 3].map(i => ({ az: Math.random() * Math.PI * 2, dist: 180 + i * 150, phase: i * 13 + Math.random() * 8, pos: new V3() }));
@@ -3336,6 +3431,7 @@ addEventListener('keydown', (e) => {
   if (k === 't') { const presets = [0.66, 0.79, 0.88, 1.0, 0.18, 0.5]; const cur = presets.findIndex(v => Math.abs(v - tod.t) < 0.02); const nxt = presets[(cur + 1) % presets.length]; todTarget = nxt; toast('Time · ' + (nxt === 1.0 ? 'Night' : '…')); }
   if (k === 'q') { qualityIdx = (qualityIdx + 1) % QUALITY.length; renderScale = QUALITY[qualityIdx].internal; adaptiveScale = 1; makeTargets(); toast('Quality · ' + QUALITY[qualityIdx].name); }
   if (k === 'm') { toggleAudio(); }
+  if (k === 'e') plantThumper(clockT);
   if (k === 'g') {
     if (weather.phase === 'clear') { weather.next = clockT; } else { weather.phase = 'clearing'; weather.t = 0; toast('The storm passes'); }
   }
@@ -3415,6 +3511,72 @@ function initAudio() {
   const hissGain = ctx.createGain(); hissGain.gain.value = 0.02;
   hiss.connect(hp).connect(hissGain).connect(master); hiss.start();
   audio = { ctx, master, bp, windGain, hissGain, wbuf, buf };
+  // ambient score: a slowly moving minor drone with a wordless, vowel-shifting chant on top
+  const t0 = ctx.currentTime;
+  const droneGain = ctx.createGain(); droneGain.gain.value = 0; droneGain.connect(master); droneGain.gain.setTargetAtTime(0.06, t0, 6);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 360; lp.Q.value = 0.8; lp.connect(droneGain);
+  const voices = [0.5, 0.32, 0.22, 0.1].map((amp, i) => {
+    const o = ctx.createOscillator(); o.type = i < 2 ? 'sawtooth' : 'triangle'; o.detune.value = i % 2 ? -7 : 7;
+    const g = ctx.createGain(); g.gain.value = amp; o.connect(g).connect(lp); o.start(); return o;
+  });
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.045; const lfoG = ctx.createGain(); lfoG.gain.value = 140; lfo.connect(lfoG).connect(lp.frequency); lfo.start();
+  const chant = ctx.createOscillator(); chant.type = 'sawtooth';
+  const vowel = ctx.createBiquadFilter(); vowel.type = 'bandpass'; vowel.frequency.value = 620; vowel.Q.value = 9;
+  const vowel2 = ctx.createBiquadFilter(); vowel2.type = 'bandpass'; vowel2.frequency.value = 1150; vowel2.Q.value = 12;
+  const chantG = ctx.createGain(); chantG.gain.value = 0;
+  chant.connect(vowel).connect(chantG); chant.connect(vowel2).connect(chantG); chantG.connect(droneGain); chant.start();
+  const vl = ctx.createOscillator(); vl.frequency.value = 0.08; const vlG = ctx.createGain(); vlG.gain.value = 220; vl.connect(vlG).connect(vowel.frequency); vl.start();
+  audio.score = { droneGain, lp, voices, chant, chantG, chord: -1, nextBeat: 0 };
+}
+// Am – F – Dm – Em, a chord every ~22 s
+const SCORE_ROOTS = [[55, 2.378], [43.65, 2.52], [36.71, 2.378], [41.2, 2.378]];
+function audioScore(tension, night) {
+  if (!audio || !audio.score) return;
+  const S = audio.score, ctx = audio.ctx, t = ctx.currentTime;
+  const idx = Math.floor(t / 22) % SCORE_ROOTS.length;
+  if (idx !== S.chord) {
+    S.chord = idx;
+    const [root, third] = SCORE_ROOTS[idx];
+    [1, 1.5, 2, third].forEach((m, i) => S.voices[i].frequency.setTargetAtTime(root * m, t, 2.5));
+    S.chant.frequency.setTargetAtTime(root * 2, t, 2.5);
+  }
+  S.lp.frequency.setTargetAtTime((night ? 240 : 360) + tension * 520, t, 1.5);
+  S.chantG.gain.setTargetAtTime(0.012 + tension * 0.05, t, 2);
+  S.droneGain.gain.setTargetAtTime(0.05 + tension * 0.035, t, 2);
+  // a low pulse quickens the blood while a worm is moving
+  if (tension > 0.3 && t > S.nextBeat) {
+    S.nextBeat = t + lerp(1.1, 0.62, tension);
+    const o = ctx.createOscillator(); o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(38, t + 0.25);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.16 * tension, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.45);
+    o.connect(g).connect(audio.master); o.start(t); o.stop(t + 0.5);
+  }
+}
+function audioThump(pos) {
+  if (!audio || !audioOn) return;
+  const ctx = audio.ctx, t = ctx.currentTime;
+  const d = pos.distanceTo(camera.position), k = clamp(12 / (d + 4), 0.05, 1);
+  const o = ctx.createOscillator(); o.frequency.setValueAtTime(92, t); o.frequency.exponentialRampToValueAtTime(44, t + 0.18);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5 * k, t + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+  o.connect(g).connect(audio.master); o.start(t); o.stop(t + 0.55);
+  const n = ctx.createBufferSource(); n.buffer = audio.wbuf;
+  const f = ctx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1800; f.Q.value = 1.2;
+  const ng = ctx.createGain(); ng.gain.setValueAtTime(0.18 * k, t); ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+  n.connect(f).connect(ng).connect(audio.master); n.start(t, Math.random() * 2, 0.1);
+}
+function audioRoar(strength = 1) {
+  if (!audio || !audioOn) return;
+  const ctx = audio.ctx, t = ctx.currentTime, dur = 5;
+  const n = ctx.createBufferSource(); n.buffer = audio.buf; n.loop = true;
+  const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.4;
+  bp.frequency.setValueAtTime(520, t); bp.frequency.exponentialRampToValueAtTime(110, t + dur);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9 * strength, t + 0.8); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  n.connect(bp).connect(g).connect(audio.master); n.start(t); n.stop(t + dur + 0.2);
+  const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.setValueAtTime(52, t); o.frequency.exponentialRampToValueAtTime(30, t + dur);
+  const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180;
+  const trem = ctx.createOscillator(); trem.frequency.value = 9; const tg = ctx.createGain(); tg.gain.value = 0.5;
+  const og = ctx.createGain(); og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.22 * strength, t + 1); og.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  trem.connect(tg).connect(og.gain);
+  o.connect(lp).connect(og).connect(audio.master); o.start(t); trem.start(t); o.stop(t + dur + 0.2); trem.stop(t + dur + 0.2);
 }
 function audioUpdate(gust, worm) {
   if (!audio) return;
@@ -3516,9 +3678,11 @@ const SHOTS = [
   { dur: 18, f: c => ({ yaw: c.heading + Math.PI + 0.32, pitch: 0.13, dist: 4.8, fov: 46, look: 1.35, lookUp: 0.2 }) },
   { dur: 17, f: c => ({ yaw: GG_AZ + Math.PI + 0.4, pitch: 0.0, dist: 5.6, fov: 44, look: 1.2, lookUp: 0.42 }) },
   { dur: 14, f: c => ({ yaw: c.heading + Math.PI * 0.55, pitch: 0.03, dist: 3.3, fov: 34, look: 1.15, lookUp: 0.05 }) },
+  { dur: 15, f: c => ({ yaw: c.heading + 2.1, pitch: 0.82, dist: 46, fov: 38, look: 1.0, lookUp: -0.02 }) },
   { dur: 16, f: c => ({ yaw: HARVESTERS[0].az + Math.PI + 0.05, pitch: 0.035, dist: 7.5, fov: 20, look: 1.4, lookUp: 0.035 }) },
   { dur: 16, f: c => ({ yaw: c.heading + 2.5, pitch: 0.36, dist: 17, fov: 50, look: 1.0, lookUp: 0.08 }) },
   { dur: 11, f: c => ({ yaw: c.heading + Math.PI * 0.82, pitch: 0.06, dist: 2.3, fov: 40, look: 0.4, lookUp: 0.02 }) },
+  { dur: 10, f: c => ({ yaw: c.heading + Math.PI * 0.62, pitch: 0.01, dist: 1.9, fov: 30, look: 0.28, lookUp: 0.14 }) },
 ];
 function wormFocus() {
   const W = wormState;
@@ -3530,7 +3694,8 @@ function wormFocus() {
 function wormShotGoal() {
   const W = wormState, f = wormFocus();
   const v = f.clone().sub(hero.pos); v.y = 0; const d = v.length(); v.normalize();
-  if (W.type === 'close') return { yaw: Math.atan2(-v.x, -v.z) + 0.22, pitch: -0.1, dist: 8, fov: 58, look: 1.3, lookUp: W.stage === 'travel' ? 0.06 : 0.3 };
+  if (W.type === 'thumper' && W.stage !== 'travel') return { yaw: Math.atan2(-v.x, -v.z) + 0.3, pitch: -0.22, dist: 9, fov: 72, look: 1.3, lookUp: 0.7 };
+  if (W.type === 'close' || W.type === 'thumper') return { yaw: Math.atan2(-v.x, -v.z) + 0.22, pitch: -0.1, dist: 8, fov: 58, look: 1.3, lookUp: W.stage === 'travel' ? 0.06 : 0.32 };
   return { yaw: Math.atan2(-v.x, -v.z) + 0.05, pitch: 0.03, dist: 7, fov: clamp(26 * 1300 / Math.max(d, 400), 18, 34), look: 1.4, lookUp: 0.05 };
 }
 function updateCamera(dt, t) {
@@ -3553,6 +3718,7 @@ function updateCamera(dt, t) {
     goal = (fbApproach && fbD < 1100)
       ? { yaw: Math.atan2(flyby.dir.x, flyby.dir.z) + 0.4, pitch: 0.04, dist: 5.2, fov: 52, look: 1.35, lookUp: 0.22 }
       : wormState.cam ? wormShotGoal()
+      : (thumper.active && thumper.flee > 0) ? (() => { const a = hero.pos.clone().sub(thumper.pos); return { yaw: Math.atan2(a.x, a.z) + 0.25, pitch: 0.06, dist: 6.5, fov: 46, look: 1.3, lookUp: 0.04 }; })()
       : SHOTS[cam.shot].f(hero);
     goal.yaw += Math.sin(t * 0.05) * 0.08 + cam.shotT * 0.006;
     const k = 0.45;
@@ -3621,7 +3787,13 @@ function updateWorld(dt, t) {
   if (manualMove) { ui.lastMove = t; auto.heading = Math.atan2(dir.x, dir.z); }
   const input = { active: true, run: keys.has('shift') || (stick.id >= 0 && Math.hypot(stick.x, stick.y) > 0.92), dir: new V3() };
   if (manualMove) input.dir.copy(dir.normalize());
-  else if (t - ui.lastMove > 8 && !wormState.freeze) input.dir.copy(autopilot(dt, t));
+  else if (thumper.flee > 0) {
+    const away = hero.pos.clone().sub(thumper.pos); away.y = 0;
+    const d = away.length();
+    if (d > 175) { thumper.flee = 0; input.active = false; }
+    else { away.normalize().applyAxisAngle(new V3(0, 1, 0), Math.sin(t * 0.3) * 0.15); input.dir.copy(away); input.run = d < 150; }
+  }
+  else if (t - ui.lastMove > 8 && !wormState.freeze && !thumper.active) input.dir.copy(autopilot(dt, t));
   else input.active = false;
   {
     let lt = null;
@@ -3630,6 +3802,7 @@ function updateWorld(dt, t) {
       const f = wormFocus();
       if (wormState.stage !== 'travel' || wormState.type === 'breach' || f.distanceTo(hero.pos) < 1400) lt = f;
     }
+    if (!lt && thumper.active && thumper.flee === 0) lt = thumper.pos.clone().add(new V3(0, 1.5, 0));
     if (!lt) {
       const G = hero.glance || (hero.glance = { until: 0, next: 6, target: null });
       if (t > G.next) {
@@ -3719,6 +3892,7 @@ function updateWorld(dt, t) {
   }
   for (let k = 8; k < 21; k++) emitAmt[k] = 0;
   for (let k = 21; k < 24; k++) emitAmt[k] = 0.55;
+  updateThumper(dt, t);
   updateWorm(dt, t);
   updateFlyby(dt, t);
   // dust devils: emitters 24-31 (two per devil)
@@ -3746,6 +3920,7 @@ function updateWorld(dt, t) {
   }
 
   audioUpdate(SH.uGust.value);
+  audioScore(wormState.phase === 'active' ? (wormState.stage === 'travel' ? 0.6 : 1) : thumper.active ? 0.35 : 0, skyMat.uniforms.uNight.value > 0.5);
 }
 // ---- Sandworm encounters --------------------------------------------------------------
 // The body follows the trail its head carves through the sand, so any scripted head motion
@@ -3827,6 +4002,13 @@ function startWorm(type, t) {
     W.arcH = -420;
     start = W.center.clone().addScaledVector(W.dir, W.arcH - 490);
     toast('Wormsign');
+  } else if (type === 'thumper') {
+    W.target.set(thumper.pos.x, 0, thumper.pos.z);
+    const a = Math.random() * Math.PI * 2;
+    start = W.target.clone().add(new V3(Math.sin(a) * 1150, 0, Math.cos(a) * 1150));
+    heading = Math.atan2(W.target.x - start.x, W.target.z - start.z);
+    W.H = 250; W.lastClose = t;
+    toast('Wormsign · it answers the thumper');
   } else { // close encounter: arrives from the side of the view and surfaces a few hundred metres away
     const side = Math.random() < 0.5 ? 1 : -1;
     const pass = new V3(p.x, 0, p.z).addScaledVector(camF, 330).add(new V3(-camF.z, 0, camF.x).multiplyScalar(side * 90));
@@ -3841,7 +4023,7 @@ function startWorm(type, t) {
   W.dir.set(Math.sin(heading), 0, Math.cos(heading));
   start.y = wormGround(start.x, start.z) - (type === 'breach' ? 160 : W.depth);
   wormTrailReset(W, start, W.dir.clone().negate().add(new V3(0, -0.35, 0)).normalize());
-  audioRumble(type === 'close' ? 1.6 : 0.8, type === 'close' ? 26 : 14);
+  audioRumble(type === 'close' || type === 'thumper' ? 1.6 : 0.8, type === 'close' || type === 'thumper' ? 26 : 14);
   if (ui.cinematic) W.cam = 1;
 }
 function wormRiseUpdate(W, dt, sinkSpeed = 55) {
@@ -3861,13 +4043,23 @@ function wormRiseUpdate(W, dt, sinkSpeed = 55) {
   } else if (W.stage === 'sink') {
     W.sHead -= sinkSpeed * dt;
     wormTrailAt(W, W.sHead, W.head);
-    if (W.head.y < g - W.depth - 30) { W.stage = 'done'; W.burstB = 1; W.burstPosB.set(W.riseBase.x, g, W.riseBase.z); }
+    if (W.head.y < g - W.depth - 30 || W.head.y < wormGround(W.head.x, W.head.z) - W.depth * 0.85 || W.sHead < W.trailS[0] - 200) { W.stage = 'done'; W.burstB = 1; W.burstPosB.set(W.riseBase.x, g, W.riseBase.z); }
   }
 }
 function updateWorm(dt, t) {
   const W = wormState;
   const p = hero.pos;
   SH.uWormB.value.z = 0;
+  {
+    const S = W.scars || [];
+    for (let i = 0; i < 20; i++) {
+      const sc = S[i], u = SH.uScar.value[i];
+      if (!sc) { u.z = 0; SCAR_JS[i] = u; continue; }
+      const age = t - sc.born;
+      u.set(sc.x, sc.z, 2.4 * smooth(0, 3, age) * smooth(150, 40, age), 0);
+      SCAR_JS[i] = u;
+    }
+  }
   W.noise = Math.max(0, W.noise + dt * ((hero.run > 0.5 ? 1.0 : hero.speed > 0.5 ? 0.04 : 0) - 0.03));
   W.shake = damp(W.shake, 0, 1.5, dt);
   W.gustBoost = damp(W.gustBoost, 0, 0.6, dt);
@@ -3875,7 +4067,7 @@ function updateWorm(dt, t) {
   emitPos[8].copy(W.burstPosA); emitKind[8] = 2; emitAmt[8] = W.burstA;
   emitPos[9].copy(W.burstPosB); emitKind[9] = 2; emitAmt[9] = W.burstB;
   if (W.phase === 'idle') {
-    if (W.noise > 14 && t - W.lastClose > 60 && W.next > t + 8) { W.next = t + 6; W.queue.unshift('close'); W.noise = 0; toast('Your rhythm carries through the sand…'); }
+    if (W.noise > 14 && t - W.lastClose > 60 && W.next > t + 8 && !thumper.active) { W.next = t + 6; W.queue.unshift('close'); W.noise = 0; toast('Your rhythm carries through the sand…'); }
     worm.visible = false; W.freeze = false; W.cam = 0;
     if (t < W.next) return;
     let type = W.queue.shift();
@@ -3908,24 +4100,39 @@ function updateWorm(dt, t) {
     // rise / harvester / close: tunnel to a spot, then thrust the head skyward
     if (T === 'harvester') { const hp = HARVESTERS[0].group.position; W.target.set(hp.x, 0, hp.z); }
     if (W.stage === 'travel') {
-      const speed = T === 'harvester' ? 37 : T === 'close' ? 52 : 50;
+      const speed = T === 'harvester' ? 37 : T === 'close' ? 52 : T === 'thumper' ? 64 : 50;
       wormTravel(W, dt, speed, W.target, T === 'harvester' ? 0.6 : 0.4);
       const dx = W.target.x - W.head.x, dz = W.target.z - W.head.z;
       const ready = T === 'harvester' ? (carry.lift > 200 || W.t > 34) : true;
-      if (Math.hypot(dx, dz) < (T === 'harvester' ? 30 : 60) && ready) {
+      if (Math.hypot(dx, dz) < (T === 'harvester' ? 30 : T === 'thumper' ? 22 : 60) && ready) {
         W.stage = 'rise'; W.riseT = 0; W.riseBase.set(W.head.x, 0, W.head.z);
         W.burstA = 1; W.burstPosA.set(W.head.x, wormGround(W.head.x, W.head.z), W.head.z);
-        if (T === 'close') { W.shake = 1.0; W.gustBoost = 1.2; audioRumble(2.0, 12); }
+        if (T === 'close' || T === 'thumper') { W.shake = 1.0; W.gustBoost = 1.2; audioRumble(2.0, 12); }
+        if (T === 'thumper') W.riseBase.set(thumper.pos.x, 0, thumper.pos.z);
+        audioRoar(T === 'close' || T === 'thumper' ? 1.4 : 0.7);
         if (T === 'harvester') W.H = Math.min(W.H, 215);
       } else if (Math.hypot(dx, dz) < 60 && !ready) {
         W.heading += dt * 0.9;   // circle beneath the harvester until it is lifted clear
       }
     } else wormRiseUpdate(W, dt);
   }
-  if (T === 'close') {
+  if (T === 'close' || T === 'thumper') {
     const d = Math.hypot(W.head.x - p.x, W.head.z - p.z);
-    W.freeze = W.stage !== 'done' && d < 1000;
+    W.freeze = W.stage !== 'done' && d < 1000 && !(T === 'thumper' && thumper.flee > 0);
     W.shake = Math.max(W.shake, smooth(900, 250, d) * 0.45 * (W.stage === 'travel' ? 1 : 0.6));
+    if (T === 'thumper' && thumper.active && !thumper.swallowed && W.stage === 'rise' && W.riseT > 0.6) thumper.swallowed = true;
+  }
+  // the mouth flares open as it breaks the surface
+  W.mouth = damp(W.mouth ?? 0, (W.stage === 'rise' || W.stage === 'hold') ? 1 : 0.1, 1.6, dt);
+  // leave a fading scar of churned sand along shallow tunnelling
+  {
+    const depth = wormGround(W.head.x, W.head.z) - W.head.y;
+    if (depth > 0 && depth < 130 && (!W.lastScar || W.lastScar.distanceTo(W.head) > 38)) {
+      W.lastScar = W.head.clone();
+      W.scars = W.scars || [];
+      W.scars.push({ x: W.head.x, z: W.head.z, born: t });
+      if (W.scars.length > 20) W.scars.shift();
+    }
   }
   // the sand wave above a tunnelling head, with spray off its crest
   {
@@ -3940,7 +4147,7 @@ function updateWorm(dt, t) {
       emitAmt[20] = (W.stage === 'travel' ? 1 : 0.4) * smooth(0, 11, amp);
     }
   }
-  // rebuild the continuous skin and let sand pour off the exposed back
+  // rebuild the continuous skin and let sand pour off the exposed back (and out of the mouth)
   worm.visible = true;
   wormMeshUpdate(W);
   for (let ce = 0; ce < 6; ce++) {
@@ -4148,7 +4355,7 @@ function tick(now) {
 }
 
 // handle for in-browser inspection (harmless for viewers)
-window.__dd = { sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
+window.__dd = { thumper, plantThumper: () => plantThumper(clockT), sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
   step(n = 60, dt = 1 / 30) { for (let i = 0; i < n; i++) { clockT += dt; updateWorld(dt, clockT); updateCamera(dt, clockT); } updateEnv(); envBuiltFor = tod.t; envDirty = false; render(dt, clockT); }, setScale(v) { renderScale = v; adaptiveScale = 1; makeTargets(); } };
 
 /* =====================================================================
