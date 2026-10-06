@@ -153,7 +153,17 @@ function scarH(x, z) {
   for (let i = 0; i < SCAR_JS.length; i++) { const s = SCAR_JS[i]; if (s.z <= 0) continue; const dx = x - s.x, dz = z - s.y; h += s.z * Math.exp(-(dx * dx + dz * dz) / 2400); }
   return h;
 }
-const terrainH = (x, z) => terrainCore(x, z, true) + scarH(x, z);
+// the sand a worm heaves up as it surfaces or tunnels shallow (mirrors wormBulge() in GLSL)
+let WORM_B = null, WORM_D = null;
+function bulgeH(x, z) {
+  if (!WORM_B || WORM_B.z <= 0) return 0;
+  const dx = x - WORM_B.x, dz = z - WORM_B.y;
+  const along = dx * WORM_D.x + dz * WORM_D.y, across = -dx * WORM_D.y + dz * WORM_D.x, r2 = WORM_B.w * WORM_B.w;
+  const lng = along < 0 ? Math.exp(along / 320) : Math.exp(-along * along / r2);
+  return WORM_B.z * Math.exp(-across * across / (r2 * 0.55)) * lng;
+}
+const terrainBase = (x, z) => terrainCore(x, z, true) + scarH(x, z);
+const terrainH = (x, z) => terrainBase(x, z) + bulgeH(x, z);
 const CLOUD_ALT = 8500;
 function fbm2JS(x, y) { let s = 0, a = 0.5; for (let i = 0; i < 5; i++) { s += a * vnoise(x, y); x = x * 2.07 + 5.3; y = y * 2.07 + 1.7; a *= 0.5; } return s; }
 function cloudDensityJS(wx, wz, time, wind, cover) {
@@ -1661,6 +1671,7 @@ class Character {
     this.feet.forEach((f, i) => {
       const sd = sides[i], LI = legInfo[i];
       const legPh = (((this.phase + W.legs.Left.hs - LI.hs) % 1) + 1) % 1;
+      if (f.planted) f.plant.y = terrainH(f.plant.x, f.plant.z) + this.ankleH;   // heaving sand lifts a planted foot
       const inStance = legPh < LI.duty;
       if (inStance && !f.planted) { f.planted = true; f.plant.copy(f.target); f.plantFwd = fwd.clone(); if (this.onStep) this.onStep(f.plant, this.speed, i); }
       else if (!inStance && f.planted && cad > 0.05) { f.planted = false; f.lift.copy(f.pos); }
@@ -2889,7 +2900,7 @@ function updateDeath(dt, t) {
   }
   if (!death.on) return;
   death.t += dt;
-  if (!death.eaten && W.head.y > death.pos.y + 4) {
+  if (!death.eaten && W.head.y > terrainH(hero.pos.x, hero.pos.z) + 2) {
     death.eaten = true;
     hero.root.visible = false; hero.cloak.mesh.visible = false;
     spawnPuffRing(death.pos);
@@ -3680,6 +3691,7 @@ function initAudio() {
   audio.score = { droneGain, lp, voices, chant, chantG, chord: -1, nextBeat: 0 };
 }
 // Am – F – Dm – Em, a chord every ~22 s
+WORM_B = SH.uWormB.value; WORM_D = SH.uWormD.value;
 const SCORE_ROOTS = [[55, 2.378], [43.65, 2.52], [36.71, 2.378], [41.2, 2.378]];
 function audioScore(tension, night) {
   if (!audio || !audio.score) return;
@@ -4092,7 +4104,7 @@ function updateWorld(dt, t) {
 // The body follows the trail its head carves through the sand, so any scripted head motion
 // (tunnelling, rising, sinking back, leaping) produces natural body motion.
 function wormBodyLen() { return WORM_LEN; }
-function wormGround(x, z) { return terrainH(x, z); }
+function wormGround(x, z) { return terrainBase(x, z); }   // the worm steers by the undisturbed sand, not its own bulge
 function wormTrailReset(W, start, back) {
   W.trail = []; W.trailS = [];
   const L = wormBodyLen() + 80;
@@ -4539,7 +4551,7 @@ function tick(now) {
 }
 
 // handle for in-browser inspection (harmless for viewers)
-window.__dd = { death, thumper, plantThumper: () => plantThumper(clockT), sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
+window.__dd = { terrainH, death, thumper, plantThumper: () => plantThumper(clockT), sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
   step(n = 60, dt = 1 / 30) { for (let i = 0; i < n; i++) { clockT += dt; updateWorld(dt, clockT); updateCamera(dt, clockT); } updateEnv(); envBuiltFor = tod.t; envDirty = false; render(dt, clockT); }, setScale(v) { renderScale = v; adaptiveScale = 1; makeTargets(); } };
 
 /* =====================================================================
