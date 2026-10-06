@@ -71,7 +71,7 @@ canvas#c:active{cursor:grabbing}
 <canvas id="c" tabindex="0" aria-label="Real-time 3D desert scene"></canvas>
 
 <div id="title" class="hud"><div class="t1">DEEP DESERT</div><div class="t2">WebGL2 · procedural world · rigged CC-BY models</div></div>
-<div id="credits" class="hud">Models via Sketchfab, CC BY 4.0: <a href="https://sketchfab.com/3d-models/fb4be07a655a47f890f1ff1d42f7f57e" target="_blank" rel="noopener">Fremen</a> by count_zero · <a href="https://sketchfab.com/3d-models/505ddeac40d14e8b9f93293cff7d6134" target="_blank" rel="noopener">Sandworm</a> by evan4129 · <a href="https://sketchfab.com/3d-models/a3ce0992a5a34c19ae891bde6695d1e6" target="_blank" rel="noopener">Ornithopter</a> by StormTown</div>
+<div id="credits" class="hud">Models via Sketchfab, CC BY 4.0: <a href="https://sketchfab.com/3d-models/fb4be07a655a47f890f1ff1d42f7f57e" target="_blank" rel="noopener">Fremen</a> by count_zero · <a href="https://sketchfab.com/3d-models/a3ce0992a5a34c19ae891bde6695d1e6" target="_blank" rel="noopener">Ornithopter</a> by StormTown</div>
 <div id="stats" class="hud"></div>
 <div id="help" class="hud">
   <span><kbd>WASD</kbd>walk</span><span><kbd>Shift</kbd>run</span><span><kbd>Drag</kbd>look</span><span><kbd>Wheel</kbd>zoom</span>
@@ -380,7 +380,10 @@ async function loadGLB(url) {
   catch (e) { console.warn('Could not load', url, e); return null; }
 }
 loadMsg.textContent = 'Loading models';
-const [fremenGLB, wormGLB, thopterGLB] = await Promise.all(['assets/fremen.json', 'assets/worm.json', 'assets/thopter.json'].map(loadGLB));
+const [fremenGLB, thopterGLB] = await Promise.all(['assets/fremen.json', 'assets/thopter.json'].map(loadGLB));
+// walk / run / idle motion capture (Mixamo clips from the three.js Soldier sample), baked to
+// leg-length-normalised joint positions and torso rotations in character space
+const gaitData = await fetch('assets/gait.json').then(r => r.ok ? r.json() : null).catch(() => null);
 loadMsg.textContent = 'Compiling shaders';
 
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
@@ -1159,7 +1162,7 @@ class Cloak {
     const damping = 0.991, g = -9.8, dt2 = dt * dt;
     for (let k = cols; k < n; k++) {
       const p = k * 3;
-      const turb = Math.sin(time * 3.1 + pos[p] * 2.3 + k * 0.37) * 0.8;
+      const turb = Math.sin(time * 3.1 + pos[p] * 2.3 + k * 0.37) * 0.8 * (this.turbScale ?? 1);
       const vx = (pos[p] - prev[p]) * damping, vy = (pos[p + 1] - prev[p + 1]) * damping, vz = (pos[p + 2] - prev[p + 2]) * damping;
       prev[p] = pos[p]; prev[p + 1] = pos[p + 1]; prev[p + 2] = pos[p + 2];
       pos[p] += vx + (acc[p] + turb * 0.6) * dt2;
@@ -1183,7 +1186,7 @@ class Cloak {
         pos[A] += dx * diff * wa; pos[A + 1] += dy * diff * wa; pos[A + 2] += dz * diff * wa;
         pos[B] -= dx * diff * wb; pos[B + 1] -= dy * diff * wb; pos[B + 2] -= dz * diff * wb;
       }
-      if (it % 2 === 1 || it === 6) this.collide(colliders, ground);
+      this.collide(colliders, ground);
     }
   }
   collide(colliders, ground) {
@@ -1286,6 +1289,49 @@ class ModelRig {
   worldPos(name) { return this.b[name].getWorldPosition(new V3()); }
 }
 
+// ---- Motion-capture cycles -----------------------------------------------------------
+const _mq1 = new THREE.Quaternion(), _mq2 = new THREE.Quaternion();
+function mcVec(c, j, u, out) {
+  const N = c.n, x = (((u % 1) + 1) % 1) * N, i = Math.floor(x) % N, k = (i + 1) % N, f = x - Math.floor(x), a = c.pos[j];
+  return out.set(a[i * 3] + (a[k * 3] - a[i * 3]) * f, a[i * 3 + 1] + (a[k * 3 + 1] - a[i * 3 + 1]) * f, a[i * 3 + 2] + (a[k * 3 + 2] - a[i * 3 + 2]) * f);
+}
+function mcQuat(c, j, u, out) {
+  const N = c.n, x = (((u % 1) + 1) % 1) * N, i = Math.floor(x) % N, k = (i + 1) % N, f = x - Math.floor(x), a = c.rot[j];
+  _mq1.set(a[i * 4], a[i * 4 + 1], a[i * 4 + 2], a[i * 4 + 3]); _mq2.set(a[k * 4], a[k * 4 + 1], a[k * 4 + 2], a[k * 4 + 3]);
+  return out.slerpQuaternions(_mq1, _mq2, f);
+}
+// find each foot's contact window (heel strike → toe-off) and the stance excursion
+function prepMocap(data, myLeg) {
+  if (!data) return null;
+  const out = {};
+  for (const [key, name] of [['walk', 'Walk'], ['run', 'Run'], ['idle', 'Idle']]) {
+    const c = data.clips[name]; if (!c) return null;
+    const N = c.n;
+    c.legs = {};
+    for (const side of ['Left', 'Right']) {
+      const ay = [], ty = [], az = [];
+      for (let i = 0; i < N; i++) { ay.push(c.pos[side + 'Foot'][i * 3 + 1]); ty.push(c.pos[side + 'ToeBase'][i * 3 + 1]); az.push(c.pos[side + 'Foot'][i * 3 + 2]); }
+      const amin = Math.min(...ay);
+      const contact = ay.map((v, i) => ty[i] < 0.03 || v < amin + 0.025);
+      // longest cyclic run of contact frames
+      let best = 0, bestStart = 0;
+      for (let st = 0; st < N; st++) { if (contact[st] && !contact[(st - 1 + N) % N]) { let l = 0; while (l < N && contact[(st + l) % N]) l++; if (l > best) { best = l; bestStart = st; } } }
+      if (best === 0 || best === N) { bestStart = 0; best = Math.round(N * 0.6); }
+      const hs = bestStart / N, duty = best / N, to = ((bestStart + best) % N) / N;
+      const zHS = az[bestStart], zTO = az[(bestStart + best) % N];
+      // foot pitch in mid-stance = flat reference
+      let p0 = 0;
+      for (let k = 0; k < best; k++) { const i = (bestStart + k) % N; const f = c.pos[side + 'Foot'], t = c.pos[side + 'ToeBase']; p0 += Math.atan2(t[i * 3 + 1] - f[i * 3 + 1], Math.hypot(t[i * 3] - f[i * 3], t[i * 3 + 2] - f[i * 3 + 2])); }
+      c.legs[side] = { hs, duty, to, zHS, zTO, pitch0: p0 / best };
+    }
+    const L = c.legs.Left;
+    c.stride = Math.max(0.3, (L.zHS - L.zTO) * myLeg / Math.max(L.duty, 0.1));
+    let hy = 0; for (let i = 0; i < N; i++) hy += c.pos.Hips[i * 3 + 1]; c.hipsMean = hy / N;
+    out[key] = c;
+  }
+  return out;
+}
+
 // Human gait: hip / knee / ankle flexion over a stride (degrees; 0% = heel strike of that leg),
 // shaped after normative gait-lab curves. Evaluated with periodic Catmull-Rom splines.
 function gaitCurve(keys) {
@@ -1360,6 +1406,7 @@ class Character {
       this.neck.position.set(0, rig.rest.neck.p.y - rig.rest.spine.p.y, 0);
       this.head.position.set(0, rig.rest.head.p.y - rig.rest.neck.p.y, 0);
       for (const arm of this.arms) arm.shoulder.position.set(arm.side * Math.abs(rig.rest.upperarmL.p.x), rig.rest.upperarmL.p.y - rig.rest.spine.p.y, 0);
+      this.mocap = prepMocap(gaitData, rig.L1 + rig.L2);
     }
     this.feet = [0, 1].map(i => ({
       side: i === 0 ? 1 : -1, planted: true, plant: new V3(), lift: new V3(), pos: new V3(), target: new V3(),
@@ -1371,7 +1418,7 @@ class Character {
       f.plant.y = terrainH(f.plant.x, f.plant.z) + this.ankleH;
       f.pos.copy(f.plant); f.lift.copy(f.plant);
     }
-    this.cloak = new Cloak(model ? { pinY: 0.37, rx: 0.205, rz: 0.15, len: 1.16, arc: 2.25 } : {});
+    this.cloak = new Cloak(model ? { pinY: 0.36, rx: 0.27, rz: 0.22, len: 1.14, arc: 2.2 } : {});
     scene.add(this.cloak.mesh);
     this.colliders = [];
     this.onStep = null;
@@ -1484,6 +1531,177 @@ class Character {
     });
   }
   forward() { return new V3(Math.sin(this.heading), 0, Math.cos(this.heading)); }
+  // Mocap-driven gait: torso and arms come straight from the walk/run/idle cycles; the feet keep
+  // their own world-locked stance phases on the terrain, with swing arcs, foot pitch, knee direction
+  // and pelvis height taken from the capture.
+  updateMocap(dt, time, gH) {
+    const M = this.mocap, rig = this.rig, run = this.run;
+    const W = M.walk, R = M.run, I = M.idle;
+    const myLeg = this.L1 + this.L2;
+    const stride = lerp(W.stride, R.stride, run);
+    const fwd = this.forward();
+    const leftV = new V3(fwd.z, 0, -fwd.x);
+    let cad = this.speed / stride;
+    if (this.speed < 0.12 && this.feet.some(f => !f.planted)) cad = Math.max(cad, 1.0);
+    this.phase = (this.phase + cad * dt) % 1;
+    const cadSafe = Math.max(cad, 0.6);
+    const gaitW = smooth(0.05, 0.55, this.speed);
+    const uW = this.phase + W.legs.Left.hs, uR = this.phase + R.legs.Left.hs, uI = time / I.dur;
+    // blended sample of a joint position (character space, my scale)
+    const v1 = new V3(), v2 = new V3(), v3 = new V3();
+    const P = (j, out) => {
+      mcVec(W, j, uW, v1); mcVec(R, j, uR, v2); v1.lerp(v2, run);
+      mcVec(I, j, uI, v3); return out.copy(v3).lerp(v1, gaitW).multiplyScalar(myLeg);
+    };
+    const qa = new THREE.Quaternion(), qb = new THREE.Quaternion(), qc = new THREE.Quaternion();
+    const Q = (j, out) => {
+      mcQuat(W, j, uW, qa); mcQuat(R, j, uR, qb); qa.slerp(qb, run);
+      mcQuat(I, j, uI, qc); return out.copy(qc).slerp(qa, gaitW);
+    };
+    const toWorldDir = (v) => v.applyQuaternion(this.root.quaternion);
+    const sides = ['Left', 'Right'];
+    // ---- feet: stance locking + capture-shaped swing ----
+    const toeLen = 0.15, heelLen = 0.06, groundUp = new V3(0, 1, 0);
+    const legInfo = sides.map(sd => {
+      const a = W.legs[sd], b = R.legs[sd];
+      return { hs: lerp(a.hs, b.hs, run), duty: lerp(a.duty, b.duty, run), zHS: lerp(a.zHS, b.zHS, run), zTO: lerp(a.zTO, b.zTO, run), p0: lerp(a.pitch0, b.pitch0, run) };
+    });
+    const ank = new V3(), toe = new V3();
+    this.feet.forEach((f, i) => {
+      const sd = sides[i], LI = legInfo[i];
+      const legPh = (((this.phase + W.legs.Left.hs - LI.hs) % 1) + 1) % 1;
+      const inStance = legPh < LI.duty;
+      if (inStance && !f.planted) { f.planted = true; f.plant.copy(f.target); f.plantFwd = fwd.clone(); if (this.onStep) this.onStep(f.plant, this.speed, i); }
+      else if (!inStance && f.planted && cad > 0.05) { f.planted = false; f.lift.copy(f.pos); }
+      P(sd + 'Foot', ank); P(sd + 'ToeBase', toe);
+      const pitch = (Math.atan2(toe.y - ank.y, Math.hypot(toe.x - ank.x, toe.z - ank.z)) - LI.p0) * gaitW;
+      f.pitch = damp(f.pitch ?? 0, clamp(pitch, -0.9, 0.6), 30, dt);
+      if (f.planted) {
+        const p = f.pitch, pf = f.plantFwd || fwd;
+        f.pos.copy(f.plant);
+        if (p < 0) {
+          const dz = -toeLen * Math.cos(p) - this.ankleH * Math.sin(p) + toeLen, dy = -toeLen * Math.sin(p) + this.ankleH * Math.cos(p) - this.ankleH;
+          f.pos.addScaledVector(pf, dz).addScaledVector(groundUp, dy);
+        } else f.pos.addScaledVector(groundUp, Math.max(0, heelLen * Math.sin(p) + this.ankleH * Math.cos(p) - this.ankleH));
+      } else {
+        const s = clamp((legPh - LI.duty) / (1 - LI.duty), 0, 1);
+        const remain = (1 - s) * (1 - LI.duty) / cadSafe + LI.duty * 0.5 / cadSafe;
+        f.target.copy(this.pos).addScaledVector(this.vel, remain).addScaledVector(leftV, f.side * (this.hipX + 0.015));
+        f.target.y = terrainH(f.target.x, f.target.z) + this.ankleH;
+        const zHS = LI.zHS * myLeg, zTO = LI.zTO * myLeg;
+        let prog = Math.abs(zHS - zTO) > 1e-3 ? clamp((ank.z - zTO) / (zHS - zTO), 0, 1) : s;
+        prog = lerp(prog, s * s * (3 - 2 * s), 0.2 + 0.8 * (1 - gaitW));
+        const baseY = this.ankleH;
+        const lift = Math.max(0, ank.y - baseY) * gaitW * 0.95;
+        f.pos.lerpVectors(f.lift, f.target, prog);
+        f.pos.y += lift * (1 - Math.abs(prog - 0.5) * 0.3);
+        f.pos.y = Math.max(f.pos.y, terrainH(f.pos.x, f.pos.z) + this.ankleH * 0.9);
+      }
+    });
+    // ---- pelvis height and sway from the capture ----
+    this.crouch = damp(this.crouch ?? 0, this.freeze ? 1 : 0, 2, dt);
+    const hips = P('Hips', new V3());
+    const standPelvis = myLeg + this.ankleH - this.hipY;
+    const hipsMean = lerp(I.hipsMean, lerp(W.hipsMean, R.hipsMean, run), gaitW) * myLeg;
+    let ground = Infinity;
+    for (const f of this.feet) if (f.planted) ground = Math.min(ground, f.plant.y - this.ankleH);
+    if (!isFinite(ground)) ground = this.lastGround ?? this.groundY;
+    this.lastGround = damp(this.lastGround ?? ground, ground, 10, dt);
+    const scaleH = standPelvis / Math.max(I.hipsMean * myLeg, 0.3);
+    let desiredY = this.lastGround + hips.y * scaleH - 0.07 * this.crouch;
+    for (const f of this.feet) {
+      const hx = this.pos.x + leftV.x * f.side * this.hipX, hz = this.pos.z + leftV.z * f.side * this.hipX;
+      const horiz = Math.hypot(f.pos.x - hx, f.pos.z - hz);
+      const reach = myLeg * 0.995;
+      desiredY = Math.min(desiredY, f.pos.y + Math.sqrt(Math.max(0, reach * reach - horiz * horiz)) - this.hipY);
+    }
+    this.pelvisWY = damp(this.pelvisWY, desiredY, 24, dt);
+    // ---- overlays: lean, banking, look-at, storm brace, crouch ----
+    const slopeF = terrainH(this.pos.x + fwd.x, this.pos.z + fwd.z) - gH;
+    this.lean = damp(this.lean, 0.02 + clamp(slopeF, -0.4, 0.5) * 0.25, 4, dt);
+    let wantYaw = clamp(this.bank * 2.5, -0.4, 0.4), wantPitch = 0;
+    if (this.look) {
+      const hx = this.look.x - this.pos.x, hy = this.look.y - (this.groundY + 1.6), hz = this.look.z - this.pos.z;
+      const ch = Math.cos(this.heading), shh = Math.sin(this.heading);
+      const lx = hx * ch - hz * shh, lz = hx * shh + hz * ch;
+      wantYaw = clamp(Math.atan2(lx, lz), -1.35, 1.35);
+      wantPitch = clamp(Math.atan2(hy, Math.hypot(lx, lz)), -0.45, 0.75);
+    }
+    this.lookYaw = damp(this.lookYaw ?? 0, wantYaw, 2.6, dt);
+    this.lookPitch = damp(this.lookPitch ?? 0, wantPitch, 2.6, dt);
+    const storm = this.stormS ?? 0;
+    const wv = SH.uWind.value, chh = Math.cos(this.heading), shh2 = Math.sin(this.heading);
+    const windSide = wv.x * chh - wv.z * shh2, windFront = wv.x * shh2 + wv.z * chh;
+    this.brace = damp(this.brace ?? 0, storm, 1.5, dt);
+    const braceRoll = -windSide * 0.1 * this.brace, bracePitch = Math.max(0, -windFront) * 0.16 * this.brace + 0.07 * this.brace;
+    this.shieldW = damp(this.shieldW ?? 0, smooth(0.45, 0.8, storm), 1.6, dt);
+    const E = new THREE.Euler(), rq = new THREE.Quaternion();
+    const over = (pitch, yaw, roll, q) => q.premultiply(rq.setFromEuler(E.set(pitch, yaw, roll, 'YXZ')));
+    const Dh = over(this.lean * 0.4 + 0.12 * this.crouch + bracePitch * 0.3, this.lookYaw * 0.1, this.bank + braceRoll * 0.4, Q('Hips', new THREE.Quaternion()));
+    const Ds = over(this.lean * 0.7 + 0.18 * this.crouch + bracePitch * 0.7, this.lookYaw * 0.2, this.bank * 0.5 + braceRoll * 0.8, Q('Spine', new THREE.Quaternion()));
+    const Dc = over(this.lean + 0.22 * this.crouch + bracePitch, this.lookYaw * 0.32, this.bank * 0.3 + braceRoll, Q('Spine2', new THREE.Quaternion()));
+    const Dn = over(this.lean * 0.6 + 0.1 * this.crouch + bracePitch * 0.8 - this.lookPitch * 0.45 + 0.12 * this.shieldW, this.lookYaw * 0.62, braceRoll * 0.6, Q('Neck', new THREE.Quaternion()));
+    const Dd = over(this.lean * 0.3 + bracePitch * 0.6 - this.lookPitch * 0.85 + 0.2 * this.shieldW, this.lookYaw, braceRoll * 0.4, Q('Head', new THREE.Quaternion()));
+    // ---- driver hierarchy (cloth pins and colliders ride on it) ----
+    this.root.position.set(this.pos.x, this.groundY, this.pos.z);
+    this.root.rotation.set(0, this.heading, 0);
+    this.pelvis.position.set(hips.x * 0.9, this.pelvisWY - this.groundY, 0);
+    this.pelvis.quaternion.copy(Dh);
+    this.spine.quaternion.copy(Dh).invert().multiply(Dc);
+    this.neck.quaternion.copy(Dc).invert().multiply(Dn);
+    this.head.quaternion.copy(Dn).invert().multiply(Dd);
+    this.root.updateMatrixWorld(true);
+    const rootQ = this.root.quaternion.clone();
+    const setBone = (name, D) => rig.setWorldQ(name, rootQ.clone().multiply(D).multiply(rig.rest[name].q));
+    setBone('hips', Dh);
+    rig.b.hips.position.copy(rig.b.hips.parent.worldToLocal(this.pelvis.getWorldPosition(new V3())));
+    rig.b.hips.updateMatrixWorld(true);
+    setBone('spine', Ds); setBone('chest', Dc); setBone('neck', Dn); setBone('head', Dd);
+    // ---- legs: IK onto the feet, knee direction from the capture ----
+    const ZP = new V3(0, 0, 1), YP = new V3(0, 1, 0);
+    const hipJ = new V3(), knee = new V3(), mid = new V3();
+    this.feet.forEach((f, i) => {
+      const sd = sides[i];
+      f.hip.copy(rig.worldPos(i === 0 ? 'thighL' : 'thighR'));
+      P(sd + 'UpLeg', hipJ); P(sd + 'Leg', knee); P(sd + 'Foot', ank);
+      mid.copy(hipJ).add(ank).multiplyScalar(0.5);
+      const kd = toWorldDir(knee.clone().sub(mid));
+      const pole = fwd.clone().multiplyScalar(0.35).add(kd.lengthSq() > 1e-6 ? kd.normalize() : fwd).add(new V3(0, 0.03, 0)).normalize();
+      solveIK(f.hip, f.pos, this.L1, this.L2, pole, f.knee, f.ankle);
+      const n = terrainNormal(f.ankle.x, f.ankle.z, 0.15);
+      const up = f.planted ? n : n.clone().lerp(new V3(0, 1, 0), 0.5).normalize();
+      const fw = fwd.clone().addScaledVector(up, -fwd.dot(up)).normalize();
+      fw.applyAxisAngle(new V3().crossVectors(up, fw).normalize(), -f.pitch);
+      const x = new V3().crossVectors(up, fw).normalize(), y = new V3().crossVectors(fw, x).normalize();
+      const sfx = i === 0 ? 'L' : 'R';
+      rig.aim('thigh' + sfx, f.knee.clone().sub(f.hip), pole, rootQ, ZP);
+      rig.aim('shin' + sfx, f.ankle.clone().sub(f.knee), pole, rootQ, ZP);
+      const restD = rig.dir['foot' + sfx];
+      rig.aim('foot' + sfx, fw.clone().multiplyScalar(Math.hypot(restD.x, restD.z)).addScaledVector(y, restD.y), y, rootQ, YP);
+    });
+    // ---- arms: capture directions; the left forearm crosses the face in a storm ----
+    const sh = new V3(), el = new V3(), hd = new V3();
+    for (const arm of this.arms) {
+      const sd = arm.side > 0 ? 'Left' : 'Right', sfx = arm.side > 0 ? 'L' : 'R';
+      P(sd + 'Arm', sh); P(sd + 'ForeArm', el); P(sd + 'Hand', hd);
+      // the cloak hangs over the shoulders: keep the arms a touch away from the torso
+      let d1 = el.clone().sub(sh).normalize(); d1.x += arm.side * 0.12; d1.normalize();
+      let d2 = hd.clone().sub(el).normalize(); d2.x += arm.side * 0.06; d2.normalize();
+      const bend = el.clone().sub(sh.clone().add(hd).multiplyScalar(0.5));
+      let pole = new V3(0, 0, 1).multiplyScalar(0.4).addScaledVector(bend.lengthSq() > 1e-6 ? bend.normalize() : new V3(), -1).normalize();
+      if (arm.side > 0 && this.shieldW > 0.001) {
+        const k = this.shieldW;
+        d1.lerp(new V3(0.18, -0.42, 0.89).normalize(), k).normalize();
+        d2.lerp(new V3(-0.8, 0.52, 0.3).normalize(), k).normalize();
+        pole.lerp(new V3(0, 1, 0.2).normalize(), k).normalize();
+      }
+      const w1 = toWorldDir(d1.clone()), w2 = toWorldDir(d2.clone()), wp = toWorldDir(pole.clone());
+      rig.aim('upperarm' + sfx, w1, wp, rootQ, ZP);
+      rig.aim('forearm' + sfx, w2, wp, rootQ, ZP);
+      rig.aim('hand' + sfx, w2.clone().addScaledVector(fwd, 0.1), wp, rootQ, ZP);
+      arm.wS = rig.worldPos('upperarm' + sfx); arm.wE = rig.worldPos('forearm' + sfx); arm.wH = rig.worldPos('hand' + sfx);
+    }
+  }
   update(dt, input, time) {
     // --- locomotion ---
     const fwdH = this.forward();
@@ -1515,6 +1733,8 @@ class Character {
     this.pos.y = gH;
     this.groundY = damp(this.groundY, gH, 12, dt);
 
+    if (this.mocap) this.updateMocap(dt, time, gH);
+    else {
     // --- gait phase (distance-driven, so planted feet never slide) ---
     const stride = lerp(1.35, 2.5, this.run);
     const duty = lerp(GAIT.walk.duty, GAIT.run.duty, this.run);
@@ -1711,16 +1931,22 @@ class Character {
       }
     }
 
+    }
+
     // --- cloth ---
     const L = (o, x, y, z) => o.localToWorld(new V3(x, y, z));
     const c = this.colliders; c.length = 0;
-    if (rig) {
+    if (this.rig) {
       c.push({ a: L(this.spine, 0.075, -0.02, 0), b: L(this.spine, 0.075, 0.3, 0.0), r: 0.14 });
       c.push({ a: L(this.spine, -0.075, -0.02, 0), b: L(this.spine, -0.075, 0.3, 0.0), r: 0.14 });
       c.push({ a: L(this.spine, 0, 0.05, -0.03), b: L(this.spine, 0, 0.3, -0.03), r: 0.15 });
       c.push({ a: L(this.pelvis, 0.07, -0.03, 0), b: L(this.pelvis, -0.07, -0.03, 0), r: 0.15 });
+      // head-wrap: the back drape and its shoulder folds, so the cloak lies over it
+      c.push({ a: L(this.spine, 0, 0.36, -0.1), b: L(this.spine, 0, 0.02, -0.15), r: 0.17 });
+      c.push({ a: L(this.spine, 0.16, 0.37, -0.02), b: L(this.spine, 0.13, 0.18, -0.07), r: 0.13 });
+      c.push({ a: L(this.spine, -0.16, 0.37, -0.02), b: L(this.spine, -0.13, 0.18, -0.07), r: 0.13 });
       for (const arm of this.arms) {
-        c.push({ a: arm.wS, b: arm.wS, r: 0.08 }, { a: arm.wS, b: arm.wE, r: 0.06 }, { a: arm.wE, b: arm.wH, r: 0.05 });
+        c.push({ a: arm.wS, b: arm.wS, r: 0.1 }, { a: arm.wS, b: arm.wE, r: 0.08 }, { a: arm.wE, b: arm.wH, r: 0.065 });
       }
     } else {
       c.push({ a: L(this.spine, 0.075, 0.04, 0), b: L(this.spine, 0.075, 0.34, -0.01), r: 0.125 });
@@ -1732,16 +1958,20 @@ class Character {
         c.push({ a: s, b: s, r: 0.075 }, { a: s, b: e, r: 0.058 }, { a: e, b: h, r: 0.05 });
       }
     }
-    for (const f of this.feet) c.push({ a: f.hip, b: f.knee, r: 0.09 }, { a: f.knee, b: f.ankle, r: 0.068 });
+    for (const f of this.feet) c.push({ a: f.hip, b: f.knee, r: 0.115 }, { a: f.knee, b: f.ankle, r: 0.09 });
+    // a skirt volume between the legs keeps the cloth from slipping through them
+    { const kneeMid = this.feet[0].knee.clone().add(this.feet[1].knee).multiplyScalar(0.5);
+      c.push({ a: L(this.pelvis, 0, -0.05, 0.0), b: kneeMid.clone().add(new V3(0, 0.05, 0)), r: 0.16 }); }
     const gp = this.groundPlane, gn = terrainNormal(this.pos.x, this.pos.z, 0.4);
     gp.h = gH; gp.x = this.pos.x; gp.z = this.pos.z; gp.gx = -gn.x / gn.y; gp.gz = -gn.z / gn.y;
     if (!this.cloak.inited) {
       this.cloak.init(this.spine);
       for (let k = 0; k < 160; k++) this.cloak.step(1 / 120, this.spine, c, new V3(), gp, k / 120);
     }
-    const gust = SH.uGust.value;
-    const wind = SH.uWind.value.clone().multiplyScalar(5.5 * gust);
-    wind.x += Math.sin(time * 1.7) * 1.2 * gust; wind.z += Math.sin(time * 1.13 + 2.0) * 1.0 * gust; wind.y = Math.sin(time * 0.9) * 0.6;
+    const gust = SH.uGust.value, storm = this.stormS ?? 0;
+    const wind = SH.uWind.value.clone().multiplyScalar(5.5 * gust * (1 + 2.2 * storm));
+    wind.x += Math.sin(time * 1.7) * 1.2 * gust * (1 + storm); wind.z += Math.sin(time * 1.13 + 2.0) * 1.0 * gust * (1 + 2 * storm); wind.y = Math.sin(time * 0.9) * 0.6 * (1 + storm);
+    this.cloak.turbScale = 1 + 3 * storm;
     this.clothAcc = Math.min(this.clothAcc + dt, 1 / 30);
     const h = 1 / 120;
     while (this.clothAcc >= h) { this.cloak.step(h, this.spine, c, wind, gp, time); this.clothAcc -= h; }
@@ -1850,7 +2080,7 @@ const puffMat = new THREE.ShaderMaterial({
       float a = smoothstep(0.5, 0.0, r) * vA;
       if (a < 0.004) discard;
       vec3 col = vec3(0.72, 0.45, 0.24) * (uKeyColor*0.55 + uAmbSky*1.1);
-      gl_FragColor = vec4(col, a*0.55);
+      gl_FragColor = vec4(col, a*0.42);
     }`,
   transparent: true, depthWrite: false,
 });
@@ -1875,7 +2105,7 @@ function spawnPuff(p, vel, speed) {
     const a = Math.random() * Math.PI * 2, r = Math.random();
     puffPos[i * 3] = p.x + Math.cos(a) * 0.08; puffPos[i * 3 + 1] = p.y - 0.05; puffPos[i * 3 + 2] = p.z + Math.sin(a) * 0.08;
     const s = 0.3 + speed * 0.35;
-    puffVel[i * 3] = Math.cos(a) * r * s - vel.x * 0.25; puffVel[i * 3 + 1] = 0.4 + Math.random() * (0.6 + speed * 0.4); puffVel[i * 3 + 2] = Math.sin(a) * r * s - vel.z * 0.25;
+    puffVel[i * 3] = Math.cos(a) * r * s - vel.x * 0.25; puffVel[i * 3 + 1] = 0.25 + Math.random() * (0.35 + speed * 0.25); puffVel[i * 3 + 2] = Math.sin(a) * r * s - vel.z * 0.25;
     puffMax[i] = 0.9 + Math.random() * 1.6; puffLife[i] = 1; puffSize[i] = 0.04 + Math.random() * 0.08;
   }
 }
@@ -1886,13 +2116,13 @@ function updatePuffs(dt, wind) {
     const p = i * 3;
     const drag = 2.2;
     puffVel[p] += (wind.x - puffVel[p]) * drag * dt;
-    puffVel[p + 1] += (-1.2 - puffVel[p + 1] * drag) * dt;
+    puffVel[p + 1] += (-2.6 - puffVel[p + 1] * drag) * dt;
     puffVel[p + 2] += (wind.z - puffVel[p + 2]) * drag * dt;
     puffPos[p] += puffVel[p] * dt; puffPos[p + 1] += puffVel[p + 1] * dt; puffPos[p + 2] += puffVel[p + 2] * dt;
     if ((i & 7) === (frameParity & 7)) puffGround[i] = terrainH(puffPos[p], puffPos[p + 2]);
     if (puffPos[p + 1] < puffGround[i] + 0.02) { puffPos[p + 1] = puffGround[i] + 0.02; puffVel[p + 1] = Math.max(0, puffVel[p + 1]); puffVel[p] *= 0.985; puffVel[p + 2] *= 0.985; }
     puffLife[i] -= dt / puffMax[i];
-    puffSize[i] += dt * 0.45;
+    puffSize[i] = Math.min(puffSize[i] + dt * 0.14, 0.32);
     if (puffLife[i] < 0) puffLife[i] = 0;
   }
   puffGeo.attributes.position.needsUpdate = true; puffGeo.attributes.aLife.needsUpdate = true; puffGeo.attributes.aSize.needsUpdate = true;
@@ -1951,6 +2181,65 @@ const streakMat = new THREE.ShaderMaterial({
 });
 const streaks = new THREE.Mesh(streakGeo, streakMat);
 streaks.frustumCulled = false; streaks.renderOrder = 3;
+
+// Sand shed from dune crests: grains are lofted off the crest, fall over the edge and then
+// run down the slip face as grain flows. Fully GPU-animated; only true crests emit.
+const FLOW_N = 18000, FLOW_BOX = 90;
+const flowGeo = new THREE.InstancedBufferGeometry();
+{ const b = new THREE.PlaneGeometry(1, 1); flowGeo.index = b.index; flowGeo.setAttribute('position', b.getAttribute('position')); flowGeo.setAttribute('uv', b.getAttribute('uv')); }
+{ const a = new Float32Array(FLOW_N * 4); for (let i = 0; i < a.length; i++) a[i] = Math.random(); flowGeo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(a, 4)); }
+flowGeo.instanceCount = FLOW_N;
+const flowMat = new THREE.ShaderMaterial({
+  uniforms: { ...SH, uCenter: { value: new V3() } },
+  vertexShader: NOISE_GLSL + KEY_UNIFORMS_GLSL + /* glsl */`
+    attribute vec4 aSeed; uniform vec3 uCenter; uniform float uStorm;
+    varying float vA; varying vec2 vUv; varying vec3 vW;
+    void main(){
+      float B = ${FLOW_BOX.toFixed(1)};
+      float life = 3.0 + aSeed.w*3.0;
+      float t = uTime + aSeed.z*life*17.0;
+      float cyc = floor(t/life), tau = fract(t/life);
+      vec2 jit = fract(vec2(sin(cyc*12.9898 + aSeed.x*78.233), sin(cyc*39.346 + aSeed.y*11.135)) * 43758.5453);
+      vec2 base = (aSeed.xy + jit*0.31)*B;
+      vec2 local = mod(base - uCenter.xz + B*0.5, B) - B*0.5;
+      vec2 p0 = uCenter.xz + local;
+      vec2 wd = normalize(uWind.xz);
+      float h0 = terrainH(p0);
+      float drop = h0 - terrainH(p0 + wd*2.5);
+      float rise = h0 - terrainH(p0 - wd*3.0);
+      float crest = smoothstep(0.22, 0.9, drop) * smoothstep(-0.3, 0.2, rise);
+      float speed = (2.2 + aSeed.w*2.2) * (0.6 + 0.5*uGust) * (1.0 + 1.5*uStorm);
+      float tt = tau*life;
+      vec2 xz = p0 + wd*speed*tt + vec2(-wd.y, wd.x)*(aSeed.y - 0.5)*(0.5 + tt*0.3);
+      float hg = terrainH(xz);
+      float yb = h0 + 0.05 + (0.7 + 0.9*aSeed.x)*tt - 1.0*tt*tt;
+      vec3 c = vec3(xz.x, max(hg + 0.025, yb), xz.y);
+      vec3 camR = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+      vec3 camU = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+      float dist = length(cameraPosition - c);
+      float size = (0.1 + 0.2*aSeed.y) * (1.0 + tau*2.0) * (1.0 + dist*0.015);
+      vec3 w = c + (camR*position.x + camU*position.y)*size;
+      float edge = 1.0 - smoothstep(B*0.33, B*0.5, length(local));
+      vA = crest * edge * smoothstep(0.0, 0.06, tau) * (1.0 - tau) * smoothstep(0.45, 1.05, uGust + uStorm + aSeed.x*0.35);
+      vUv = uv; vW = c;
+      gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+    }`,
+  fragmentShader: HAZE_GLSL + KEY_UNIFORMS_GLSL + /* glsl */`
+    varying float vA; varying vec2 vUv; varying vec3 vW;
+    void main(){
+      float r = length(vUv - 0.5)*2.0;
+      float a = smoothstep(1.0, 0.2, r) * vA * 0.8;
+      if (a < 0.004) discard;
+      vec3 V = normalize(vW - cameraPosition);
+      float fs = pow(max(dot(V, uKeyDir), 0.0), 5.0);
+      vec3 col = vec3(0.82, 0.55, 0.3) * (uKeyColor*(0.7 + 0.8*fs) + uAmbSky*1.1);
+      gl_FragColor = vec4(applyHaze(col, vW, 1.0), a);
+    }`,
+  transparent: true, depthWrite: false,
+});
+const sandFlow = new THREE.Mesh(flowGeo, flowMat);
+sandFlow.frustumCulled = false; sandFlow.renderOrder = 3;
+scene.add(sandFlow);
 scene.add(streaks);
 
 const MOTE_N = 2600;
@@ -2142,8 +2431,8 @@ function carryLightsGeometry() {
 }
 const carryExhaustMat = new THREE.ShaderMaterial({
   uniforms: { ...SH },
-  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-  fragmentShader: `uniform float uTime; varying vec2 vUv; void main(){ float f = pow(1.0 - vUv.y, 2.5) * (0.8 + 0.2*sin(uTime*40.0 + vUv.x*30.0)); gl_FragColor = vec4(vec3(1.0, 0.7, 0.42) * f * 2.2, f); }`,
+  vertexShader: `varying vec2 vUv; varying vec3 vW; void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+  fragmentShader: HAZE_GLSL + `uniform float uTime; varying vec2 vUv; varying vec3 vW; void main(){ float f = pow(1.0 - vUv.y, 2.5) * (0.8 + 0.2*sin(uTime*40.0 + vUv.x*30.0)) * (1.0 - hazeAmount(vW, 2.1)); gl_FragColor = vec4(vec3(1.0, 0.7, 0.42) * f * 2.2, f); }`,
   transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
 });
 function makeCarryall(scale) {
@@ -2320,8 +2609,8 @@ const frigate = new THREE.Group();
   frigate.add(new THREE.Mesh(mergeGeometries(parts), fm));
   const glowMat = new THREE.ShaderMaterial({
     uniforms: { ...SH },
-    vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-    fragmentShader: `uniform float uTime; varying vec2 vUv; void main(){ float f = pow(1.0 - vUv.y, 2.2) * (0.85 + 0.15*sin(uTime*30.0 + vUv.x*40.0)); gl_FragColor = vec4(vec3(1.0, 0.62, 0.32) * f * 3.2, f); }`,
+    vertexShader: `varying vec2 vUv; varying vec3 vW; void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position, 1.0); vW = w.xyz; gl_Position = projectionMatrix * viewMatrix * w; }`,
+    fragmentShader: HAZE_GLSL + `uniform float uTime; varying vec2 vUv; varying vec3 vW; void main(){ float f = pow(1.0 - vUv.y, 2.2) * (0.85 + 0.15*sin(uTime*30.0 + vUv.x*40.0)) * (1.0 - hazeAmount(vW, 1.25)); gl_FragColor = vec4(vec3(1.0, 0.62, 0.32) * f * 3.2, f); }`,
     transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
   });
   for (const [x, z] of [[-55, -320], [55, -320], [-55, 0], [55, 0], [-55, 300], [55, 300]]) {
@@ -2331,46 +2620,119 @@ const frigate = new THREE.Group();
   scene.add(frigate);
 }
 
-// Sandworm: rigged model; its spine bones ride an arc-length parameterised breach path
-const WORM_SCALE = 7.6, WORM_SEG = 72;
+// Sandworm: one continuous skin (plated rings, tapering tail, three-lobed mouth lined with
+// crystal teeth) rebuilt every frame along the trail its head carves through the sand.
+const WORM_LEN = 760, WORM_R = 40, WORM_SIDES = 30, LIP_RINGS = 7, BODY_RINGS = 170, THROAT_RINGS = 9;
 const worm = new THREE.Group(); worm.visible = false; scene.add(worm);
-let wormRig = null, wormLegacy = null;
-if (wormGLB) {
-  const ws = wormGLB.scene;
-  ws.updateMatrixWorld(true);
-  const bones = [];
-  ws.traverse(o => {
-    if (o.isBone && /^Bone/.test(o.name)) bones.push(o);
-    if (o.isMesh) { o.frustumCulled = false; o.material = hazeify(o.material.clone(), 1.4); o.material.envMapIntensity = 0.7; }
-  });
-  const idx = b => parseInt(b.name.split('_').pop(), 10);
-  bones.sort((a, b) => idx(a) - idx(b));
-  const P = bones.map(b => b.getWorldPosition(new V3()));
-  const Q = bones.map(b => b.getWorldQuaternion(new THREE.Quaternion()));
-  const sLen = [0]; for (let i = 1; i < P.length; i++) sLen.push(sLen[i - 1] + P[i].distanceTo(P[i - 1]));
-  const total = sLen[sLen.length - 1];
-  const dirs = P.map((p, i) => (i < P.length - 1 ? P[i + 1].clone().sub(p) : p.clone().sub(P[i - 1])).normalize());
-  // the mouth end is the wider one
-  const axis = P[P.length - 1].clone().sub(P[0]).normalize();
-  let rA = 0, nA = 0, rB = 0, nB = 0; const v = new V3();
-  ws.traverse(o => {
-    if (!o.isSkinnedMesh) return;
-    const pa = o.geometry.attributes.position;
-    for (let i = 0; i < pa.count; i += 5) {
-      v.fromBufferAttribute(pa, i).applyMatrix4(o.matrixWorld).sub(P[0]);
-      const t = v.dot(axis) / total, rad = v.clone().addScaledVector(axis, -v.dot(axis)).length();
-      if (t < 0.1) { rA += rad; nA++; } else if (t > 0.9) { rB += rad; nB++; }
+function wormRingTable() {
+  const rings = [];
+  for (let k = 0; k < LIP_RINGS; k++) { const t = k / (LIP_RINGS - 1); rings.push({ s: -16 * (1 - t), r: WORM_R * (1.28 - 0.28 * t), lip: 1 - t }); }
+  for (let k = 1; k <= BODY_RINGS; k++) {
+    const s = WORM_LEN * Math.pow(k / BODY_RINGS, 1.1);
+    const taper = 1 - 0.72 * smooth(0.45, 1.0, s / WORM_LEN);
+    const plate = Math.pow(1 - ((s / 11) % 1), 3);
+    rings.push({ s, r: WORM_R * taper * (1 + 0.06 * plate), lip: 0 });
+  }
+  return rings;
+}
+const WORM_RINGS = wormRingTable();
+function tubeGeometry(nRings, nSides, inward) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(nRings * nSides * 3), 3).setUsage(THREE.DynamicDrawUsage));
+  const idx = [];
+  for (let k = 0; k < nRings - 1; k++) for (let j = 0; j < nSides; j++) {
+    const a = k * nSides + j, b = k * nSides + (j + 1) % nSides, c = a + nSides, d = b + nSides;
+    if (inward) idx.push(a, b, c, b, d, c); else idx.push(a, c, b, b, c, d);
+  }
+  g.setIndex(idx);
+  return g;
+}
+const wormGeo = tubeGeometry(WORM_RINGS.length, WORM_SIDES, false);
+{ const sA = new Float32Array(WORM_RINGS.length * WORM_SIDES), tA = new Float32Array(sA.length);
+  WORM_RINGS.forEach((rg, k) => { for (let j = 0; j < WORM_SIDES; j++) { sA[k * WORM_SIDES + j] = rg.s; tA[k * WORM_SIDES + j] = j / WORM_SIDES; } });
+  wormGeo.setAttribute('aS', new THREE.BufferAttribute(sA, 1)); wormGeo.setAttribute('aTh', new THREE.BufferAttribute(tA, 1)); }
+const wormSkinMat = hazeify(new THREE.MeshStandardMaterial({ color: 0x8a7158, roughness: 0.88, metalness: 0.04, side: THREE.DoubleSide }), 1.35, (sh) => {
+  sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nattribute float aS; attribute float aTh; varying float vS; varying float vTh;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvS = aS; vTh = aTh;');
+  sh.fragmentShader = sh.fragmentShader.replace('#include <common>', '#include <common>\nvarying float vS; varying float vTh;')
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      { float f = fract(vS / 11.0);
+        float seam = smoothstep(0.0, 0.07, f) * smoothstep(1.0, 0.8, f);          // dark gap between plates
+        float grain = 0.82 + 0.18 * sin(vTh * 6.2832 * 23.0 + vS * 0.7) * sin(vS * 1.9 + vTh * 40.0);
+        float dorsal = 0.75 + 0.25 * cos((vTh - 0.25) * 6.2832);                     // sun-bleached back
+        float lip = smoothstep(0.0, -12.0, vS);
+        diffuseColor.rgb *= mix(0.38, 1.0, seam) * grain * dorsal;
+        diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.32, 0.22, 0.17), lip * 0.6); }`);
+});
+const wormMesh = new THREE.Mesh(wormGeo, wormSkinMat); wormMesh.frustumCulled = false; worm.add(wormMesh);
+// throat: an inward-facing tube behind the lip, dark and wet-looking
+const throatGeo = tubeGeometry(THROAT_RINGS, WORM_SIDES, true);
+const throatMat = hazeify(new THREE.MeshStandardMaterial({ color: 0x2a140f, roughness: 0.35, metalness: 0.1, side: THREE.DoubleSide }), 1.35);
+const throatMesh = new THREE.Mesh(throatGeo, throatMat); throatMesh.frustumCulled = false; worm.add(throatMesh);
+// rings of crystalline teeth pointing back down the throat
+const TOOTH_RINGS = 6, TOOTH_PER = 26;
+const toothMat = hazeify(new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.25, metalness: 0.1, emissive: 0x1a1612 }), 1.35);
+const teeth = new THREE.InstancedMesh(new THREE.ConeGeometry(1.7, 10, 6), toothMat, TOOTH_RINGS * TOOTH_PER);
+teeth.frustumCulled = false; worm.add(teeth);
+const _wF = { T: new V3(), U: new V3(), N: new V3(), C: new V3() };
+function wormMeshUpdate(W) {
+  const pos = wormGeo.attributes.position.array, tpos = throatGeo.attributes.position.array;
+  const C = new V3(), A = new V3(), Bv = new V3(), T = new V3(), U = new V3(), N = new V3();
+  let prevU = null;
+  const frameAt = (sq, out) => {   // centre, tangent (toward the head) and a parallel-transported side vector
+    wormTrailAt(W, sq, out.C);
+    wormTrailAt(W, sq + 3, A); wormTrailAt(W, sq - 3, Bv);
+    out.T.subVectors(A, Bv); if (out.T.lengthSq() < 1e-8) out.T.copy(W.dir); out.T.normalize();
+    if (prevU) out.U.copy(prevU).addScaledVector(out.T, -prevU.dot(out.T));
+    if (!prevU || out.U.lengthSq() < 1e-6) out.U.crossVectors(out.T, new V3(0, 1, 0));
+    if (out.U.lengthSq() < 1e-6) out.U.set(-W.dir.z, 0, W.dir.x);
+    out.U.normalize(); out.N.crossVectors(out.U, out.T).normalize();
+    prevU = out.U.clone();
+    return out;
+  };
+  let head = null;
+  WORM_RINGS.forEach((rg, k) => {
+    const F = frameAt(W.sHead - rg.s, _wF);
+    if (k === LIP_RINGS - 1) head = { C: F.C.clone(), T: F.T.clone(), U: F.U.clone(), N: F.N.clone() };
+    for (let j = 0; j < WORM_SIDES; j++) {
+      const th = j / WORM_SIDES * Math.PI * 2, ct = Math.cos(th), st = Math.sin(th);
+      const lobe = Math.cos(3 * th);
+      const r = rg.r * (1 + rg.lip * 0.22 * lobe);
+      const fwdExt = rg.lip * (4 + 7 * (0.5 + 0.5 * lobe));
+      const o = (k * WORM_SIDES + j) * 3;
+      pos[o] = F.C.x + (F.U.x * ct + F.N.x * st) * r + F.T.x * fwdExt;
+      pos[o + 1] = F.C.y + (F.U.y * ct + F.N.y * st) * r + F.T.y * fwdExt;
+      pos[o + 2] = F.C.z + (F.U.z * ct + F.N.z * st) * r + F.T.z * fwdExt;
     }
   });
-  const headAtStart = (rA / Math.max(nA, 1)) > (rB / Math.max(nB, 1));
-  wormRig = { ws, bones, P, Q, sLen, total, dirs, headAtStart };
-  worm.add(ws); worm.scale.setScalar(WORM_SCALE);
-} else {
-  const wormSegGeo = lathe([[0.9, 0], [1.0, 0.12], [1.02, 0.5], [1.0, 0.88], [0.92, 1.0]], 24);
-  const wormMat = hazeify(new THREE.MeshStandardMaterial({ color: 0x6a5644, roughness: 0.92, metalness: 0.05 }), 1.9);
-  wormLegacy = new THREE.InstancedMesh(wormSegGeo, wormMat, WORM_SEG);
-  wormLegacy.frustumCulled = false; worm.add(wormLegacy);
+  wormGeo.attributes.position.needsUpdate = true; wormGeo.computeVertexNormals();
+  // throat + teeth ride rigidly on the head frame
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(1, 1, 1), up = new V3(0, 1, 0);
+  for (let k = 0; k < THROAT_RINGS; k++) {
+    const t = k / (THROAT_RINGS - 1), back = -12 + t * 60, r = WORM_R * (1.05 - 0.45 * t);
+    for (let j = 0; j < WORM_SIDES; j++) {
+      const th = j / WORM_SIDES * Math.PI * 2, rr = r * (1 + (1 - t) * 0.18 * Math.cos(3 * th));
+      const o = (k * WORM_SIDES + j) * 3;
+      for (let a = 0; a < 3; a++) tpos[o + a] = [head.C.x, head.C.y, head.C.z][a] + ([head.U.x, head.U.y, head.U.z][a] * Math.cos(th) + [head.N.x, head.N.y, head.N.z][a] * Math.sin(th)) * rr - [head.T.x, head.T.y, head.T.z][a] * back;
+    }
+  }
+  throatGeo.attributes.position.needsUpdate = true; throatGeo.computeVertexNormals();
+  let n = 0;
+  for (let k = 0; k < TOOTH_RINGS; k++) {
+    const back = -6 + k * 7.5, r = WORM_R * (0.98 - 0.07 * k);
+    for (let j = 0; j < TOOTH_PER; j++) {
+      const th = (j + (k % 2) * 0.5) / TOOTH_PER * Math.PI * 2;
+      const radial = head.U.clone().multiplyScalar(Math.cos(th)).addScaledVector(head.N, Math.sin(th));
+      const p = head.C.clone().addScaledVector(radial, r * 0.93).addScaledVector(head.T, -back);
+      const dir = radial.clone().multiplyScalar(-1).addScaledVector(head.T, -0.75).normalize();
+      q.setFromUnitVectors(up, dir);
+      sc.setScalar(1.0 - 0.1 * k + 0.25 * Math.sin(j * 7.3 + k));
+      m.compose(p.addScaledVector(dir, 4), q, sc); teeth.setMatrixAt(n++, m);
+    }
+  }
+  teeth.instanceMatrix.needsUpdate = true;
 }
+
 const WORM_COMPRESS = 0.88, WORM_DEPTH = 78;
 const wormState = { phase: 'idle', type: null, t: 0, next: 24, stage: '', trail: [], trailS: [], sHead: 0, head: new V3(),
   dir: new V3(1, 0, 0), heading: 0, target: new V3(), riseBase: new V3(), riseT: 0, H: 200, depth: WORM_DEPTH,
@@ -2379,11 +2741,11 @@ const wormState = { phase: 'idle', type: null, t: 0, next: 24, stage: '', trail:
 const carry = { state: 'hover', t: 0, dock: 0, lift: 0 };
 
 // Dust devils wander the middle distance
-const DEVILS = [0, 1, 2].map(i => ({ az: Math.random() * Math.PI * 2, dist: 260 + i * 210, phase: Math.random() * 40, pos: new V3() }));
+const DEVILS = [0, 1, 2, 3].map(i => ({ az: Math.random() * Math.PI * 2, dist: 180 + i * 150, phase: i * 13 + Math.random() * 8, pos: new V3() }));
 const spice = { next: 55, t: -1, pos: new V3(), az: 0, dist: 0 };
 
 // Dust plumes (GPU billboards), lit with forward scattering
-const EMIT_MAX = 24, PLUME_PER = 44;
+const EMIT_MAX = 32, PLUME_PER = 44;
 const plumeGeo = new THREE.InstancedBufferGeometry();
 { const b = new THREE.PlaneGeometry(1, 1); plumeGeo.index = b.index; plumeGeo.setAttribute('position', b.getAttribute('position')); plumeGeo.setAttribute('uv', b.getAttribute('uv')); }
 {
@@ -2428,12 +2790,12 @@ const plumeMat = new THREE.ShaderMaterial({
         spread = (aSeed.yzw - 0.5) * vec3(90.0, 24.0, 90.0);
         size = 36.0 + age*18.0;
       } else if (kind < 4.5){     // dust devil: a rising spiral
-        float hgt = age*15.0*(0.55 + aSeed.y*0.9);
-        float ang = age*(2.6 + aSeed.z*2.2) + aSeed.w*6.283;
-        float rad = 1.5 + hgt*0.15;
-        drift = vec3(cos(ang)*rad, hgt, sin(ang)*rad) + wd*age*1.8;
+        float hgt = age*13.0*(0.5 + aSeed.y*0.9);
+        float ang = age*(3.2 + aSeed.z*2.5) + aSeed.w*6.283;
+        float rad = 1.2 + hgt*0.13 + aSeed.x*1.5;
+        drift = vec3(cos(ang)*rad, hgt, sin(ang)*rad) + wd*age*1.8 + vec3(sin(age*0.9 + aSeed.y*6.0), 0.0, cos(age*0.7 + aSeed.z*6.0))*hgt*0.05;
         spread = vec3(0.0);
-        size = 3.5 + hgt*0.34;
+        size = 5.0 + hgt*0.42;
       } else if (kind < 5.5){     // spice blow geyser
         drift = vec3(0.0, age*55.0*(1.0 - a*0.55), 0.0) + wd*age*10.0;
         spread = (aSeed.yzw - 0.5) * (40.0 + age*28.0) * vec3(1.0, 0.5, 1.0);
@@ -2466,7 +2828,7 @@ const plumeMat = new THREE.ShaderMaterial({
       vec3 V = normalize(vW - cameraPosition);
       float fs = pow(max(dot(V, uSunDir), 0.0), 6.0);
       vec3 alb = (vKind > 4.5 && vKind < 5.5) ? mix(vec3(0.82, 0.36, 0.1), vec3(0.6, 0.41, 0.26), vAge) : vec3(0.6, 0.41, 0.26);
-      if (vKind > 3.5 && vKind < 4.5) a *= 0.75;
+      if (vKind > 3.5 && vKind < 4.5) a *= 1.35;
       vec3 col = alb * (uAmbSky*1.1 + uKeyColor*(0.32 + 0.25*n + 1.6*fs));
       col = applyHaze(col, vW, 1.25);
       gl_FragColor = vec4(col, a);
@@ -3363,13 +3725,15 @@ function updateWorld(dt, t) {
   for (let k = 21; k < 24; k++) emitAmt[k] = 0.55;
   updateWorm(dt, t);
   updateFlyby(dt, t);
-  // dust devils: emitters 16-18
+  // dust devils: emitters 24-31 (two per devil)
+  for (let k = 16; k < 19; k++) emitAmt[k] = 0;
   DEVILS.forEach((dv, i) => {
     dv.az += dt * 0.01 * (i % 2 ? 1 : -1);
     const x = p.x + Math.sin(dv.az) * dv.dist, z = p.z + Math.cos(dv.az) * dv.dist;
     dv.pos.set(x, terrainH(x, z) - 2, z);
     const life = ((t + dv.phase) % 48) / 48;
-    emitPos[16 + i].copy(dv.pos); emitKind[16 + i] = 4; emitAmt[16 + i] = smooth(0.0, 0.15, life) * smooth(1.0, 0.75, life);
+    const amt = smooth(0.0, 0.1, life) * smooth(1.0, 0.85, life) * (1 + weather.S);
+    for (const e of [24 + i * 2, 25 + i * 2]) { emitPos[e].copy(dv.pos); emitKind[e] = 4; emitAmt[e] = amt; }
     if (life < 0.01) { dv.az = Math.random() * Math.PI * 2; }
   });
   // spice blow: emitter 19
@@ -3390,7 +3754,7 @@ function updateWorld(dt, t) {
 // ---- Sandworm encounters --------------------------------------------------------------
 // The body follows the trail its head carves through the sand, so any scripted head motion
 // (tunnelling, rising, sinking back, leaping) produces natural body motion.
-function wormBodyLen() { return wormRig ? wormRig.total * WORM_SCALE * WORM_COMPRESS : WORM_SEG * 15; }
+function wormBodyLen() { return WORM_LEN; }
 function wormGround(x, z) { return terrainH(x, z); }
 function wormTrailReset(W, start, back) {
   W.trail = []; W.trailS = [];
@@ -3580,46 +3944,14 @@ function updateWorm(dt, t) {
       emitAmt[20] = (W.stage === 'travel' ? 1 : 0.4) * smooth(0, 11, amp);
     }
   }
-  // drive the skinned spine along the trail
+  // rebuild the continuous skin and let sand pour off the exposed back
   worm.visible = true;
-  if (wormRig) {
-    const R = wormRig, n = R.bones.length, restPole = new V3(1, 0, 0);
-    const offs = i => (R.headAtStart ? R.sLen[i] : R.total - R.sLen[i]) * WORM_SCALE * WORM_COMPRESS;
-    let ce = 0, prevSide = null;
-    for (let i = 0; i < n; i++) {
-      const b = R.bones[i];
-      wormTrailAt(W, W.sHead - offs(i), _wp);
-      if (i < n - 1) wormTrailAt(W, W.sHead - offs(i + 1), _wn).sub(_wp);
-      else { wormTrailAt(W, W.sHead - offs(i - 1), _wn); _wn.subVectors(_wp, _wn); }
-      const tdir = _wn.clone().normalize();
-      let side = new V3().crossVectors(tdir, new V3(0, 1, 0));
-      if (side.lengthSq() < 0.02) side = prevSide ? prevSide.clone() : new V3(-W.dir.z, 0, W.dir.x);
-      side.normalize(); prevSide = side;
-      frameBasis(_wn, side, _bm1); frameBasis(R.dirs[i], restPole, _bm2);
-      _bm1.multiply(_bm2.transpose());
-      _wq.setFromRotationMatrix(_bm1).multiply(R.Q[i]);
-      b.parent.updateWorldMatrix(true, false);
-      b.parent.getWorldQuaternion(_q1);
-      b.quaternion.copy(_q1.invert().multiply(_wq));
-      b.position.copy(b.parent.worldToLocal(_wp.clone()));
-      b.updateMatrixWorld(true);
-      if (i % 2 === 1 && ce < 6) {
-        const above = _wp.y - wormGround(_wp.x, _wp.z);
-        emitPos[10 + ce].set(_wp.x, _wp.y + 45, _wp.z); emitKind[10 + ce] = 3;
-        emitAmt[10 + ce] = smooth(10, 90, above);
-        ce++;
-      }
-    }
-  } else if (wormLegacy) {
-    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(), up = new V3(0, 1, 0);
-    for (let k = 0; k < WORM_SEG; k++) {
-      wormTrailAt(W, W.sHead - k * 15, _wp); wormTrailAt(W, W.sHead - k * 15 + 15, _wn);
-      const dv = _wn.clone().sub(_wp); const len = dv.length(); dv.divideScalar(len || 1);
-      q.setFromUnitVectors(up, dv);
-      const r = 26 * (k < 3 ? 1.2 - k * 0.04 : clamp(1.1 - k / WORM_SEG * 0.55, 0.45, 1.1));
-      sc.set(r, len * 1.02, r); m.compose(_wp, q, sc); wormLegacy.setMatrixAt(k, m);
-    }
-    wormLegacy.instanceMatrix.needsUpdate = true;
+  wormMeshUpdate(W);
+  for (let ce = 0; ce < 6; ce++) {
+    wormTrailAt(W, W.sHead - 60 - ce * 95, _wp);
+    const above = _wp.y - wormGround(_wp.x, _wp.z);
+    emitPos[10 + ce].set(_wp.x, _wp.y + WORM_R * 0.9, _wp.z); emitKind[10 + ce] = 3;
+    emitAmt[10 + ce] = smooth(5, 70, above);
   }
   if (W.stage === 'done') {
     W.phase = 'idle'; worm.visible = false; W.freeze = false; W.cam = 0;
@@ -3689,6 +4021,7 @@ function render(dt, t) {
   const gq = gpuBegin();
   terrainMat.uniforms.uGridOrigin.value.set(Math.floor(camera.position.x / GRID_STEP) * GRID_STEP, Math.floor(camera.position.z / GRID_STEP) * GRID_STEP);
   streakMat.uniforms.uCenter.value.copy(hero.pos);
+  flowMat.uniforms.uCenter.value.copy(hero.pos);
   moteMat.uniforms.uCenter.value.copy(camera.position);
   if (sun.shadow.map) SHADOW_UNI.uShadowMap.value = sun.shadow.map.texture;
   updateHeightMap(false);
@@ -3819,7 +4152,7 @@ function tick(now) {
 }
 
 // handle for in-browser inspection (harmless for viewers)
-window.__dd = { carryall, convoy2: null, flyby, frigate, convoy, wormRig, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
+window.__dd = { sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
   step(n = 60, dt = 1 / 30) { for (let i = 0; i < n; i++) { clockT += dt; updateWorld(dt, clockT); updateCamera(dt, clockT); } updateEnv(); envBuiltFor = tod.t; envDirty = false; render(dt, clockT); }, setScale(v) { renderScale = v; adaptiveScale = 1; makeTargets(); } };
 
 /* =====================================================================
