@@ -23,6 +23,8 @@ A real-time WebGL2 desert in the browser. A cloaked wanderer crosses endless dun
 
 On touch screens, the left thumb walks with a virtual joystick and dragging on the right looks around.
 
+Until you touch anything the walker wanders on its own, and it takes over again after a minute without input.
+
 ## What's in it
 
 - **Terrain:** analytic dunes evaluated identically in JS and GLSL, with per-pixel normals, wind ripples, glints, ray-marched dune self-shadowing and a 64 m deformation field for footprints and slide marks.
