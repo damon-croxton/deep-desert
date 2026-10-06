@@ -137,12 +137,16 @@ function terrainCore(x, z, detail) {
   const wx = vnoise(x * 0.0035, z * 0.0035) - 0.5;
   const wz = vnoise(x * 0.0035 + 31.7, z * 0.0035 + 11.3) - 0.5;
   const qx = x + wx * 90, qz = z + wz * 160;
-  const big = (vnoise(x * 0.0011 + 7.1, z * 0.0011 + 3.3) - 0.5) * 70 + (vnoise(x * 0.0045 + 1.3, z * 0.0045 + 9.9) - 0.5) * 14;
-  const amp = 11 * (0.25 + 0.95 * vnoise(qx * 0.005 + 3, qz * 0.005 + 5));
-  let h = big + duneProfile(qx / 115 + 0.25 * vnoise(qx * 0.006, qz * 0.006)) * amp;
+  // regional character (~1 km): open flats, ordinary dune seas and hill country with big ridged draa
+  const region = vnoise(x * 0.0009 + 17.3, z * 0.0009 + 5.1);
+  const flatK = 1 - smooth(0.16, 0.34, region), hillK = smooth(0.52, 0.8, region);
+  const big = bigH(x, z);
+  const an = vnoise(qx * 0.005 + 3, qz * 0.005 + 5);
+  const amp = 11 * (0.15 + 1.25 * an * an) * (1 - 0.88 * flatK) * (1 + 0.5 * hillK);
+  let h = big + duneProfile(qx / 115 + 0.4 * vnoise(qx * 0.006, qz * 0.006)) * amp;
   if (detail) {
     const rx = qx * 0.8 - qz * 0.6;
-    h += duneProfile(rx / 41 + 0.25 * vnoise(qx * 0.01 + 4, qz * 0.01 + 4)) * 3.2 * vnoise(qx * 0.008 + 9, qz * 0.008 + 2);
+    h += duneProfile(rx / 41 + 0.25 * vnoise(qx * 0.01 + 4, qz * 0.01 + 4)) * 3.2 * vnoise(qx * 0.008 + 9, qz * 0.008 + 2) * (1 - 0.75 * flatK);
   }
   return h;
 }
@@ -174,7 +178,11 @@ function cloudDensityJS(wx, wz, time, wind, cover) {
   return smooth(1 - cov, 1 - cov + 0.28, n);
 }
 const terrainLo = (x, z) => terrainCore(x, z, false);
-const bigH = (x, z) => (vnoise(x * 0.0011 + 7.1, z * 0.0011 + 3.3) - 0.5) * 70 + (vnoise(x * 0.0045 + 1.3, z * 0.0045 + 9.9) - 0.5) * 14;
+function bigH(x, z) {   // the large-scale landform (mirrors the GLSL); far props sit on this
+  const region = vnoise(x * 0.0009 + 17.3, z * 0.0009 + 5.1), hillK = smooth(0.52, 0.8, region);
+  const rn = 1 - Math.abs(2 * vnoise(x * 0.0021 + 3.7, z * 0.0021 + 8.1) - 1);
+  return (vnoise(x * 0.0011 + 7.1, z * 0.0011 + 3.3) - 0.5) * 70 + (vnoise(x * 0.0045 + 1.3, z * 0.0045 + 9.9) - 0.5) * 14 + rn * rn * 36 * hillK;
+}
 function terrainNormal(x, z, e = 0.2) {
   const h0 = terrainH(x, z);
   return new V3(h0 - terrainH(x + e, z), e, h0 - terrainH(x, z + e)).normalize();
@@ -249,13 +257,18 @@ float terrainCore(vec2 p, out float prof, bool detail){
   float wx = vnoise(p*0.0035) - 0.5;
   float wz = vnoise(p*0.0035 + vec2(31.7, 11.3)) - 0.5;
   vec2 q = p + vec2(wx*90.0, wz*160.0);
-  float big = (vnoise(p*0.0011 + vec2(7.1,3.3)) - 0.5)*70.0 + (vnoise(p*0.0045 + vec2(1.3,9.9)) - 0.5)*14.0;
-  float amp = 11.0*(0.25 + 0.95*vnoise(q*0.005 + vec2(3.0,5.0)));
-  prof = duneProfile(q.x/115.0 + 0.25*vnoise(q*0.006));
+  // regional character (~1 km): open flats, ordinary dune seas and hill country with big ridged draa
+  float region = vnoise(p*0.0009 + vec2(17.3, 5.1));
+  float flatK = 1.0 - smoothstep(0.16, 0.34, region), hillK = smoothstep(0.52, 0.8, region);
+  float rn = 1.0 - abs(2.0*vnoise(p*0.0021 + vec2(3.7, 8.1)) - 1.0);
+  float big = (vnoise(p*0.0011 + vec2(7.1,3.3)) - 0.5)*70.0 + (vnoise(p*0.0045 + vec2(1.3,9.9)) - 0.5)*14.0 + rn*rn*36.0*hillK;
+  float an = vnoise(q*0.005 + vec2(3.0,5.0));
+  float amp = 11.0*(0.15 + 1.25*an*an)*(1.0 - 0.88*flatK)*(1.0 + 0.5*hillK);
+  prof = duneProfile(q.x/115.0 + 0.4*vnoise(q*0.006));
   float h = big + prof*amp;
   if (detail){
     float rx = q.x*0.8 - q.y*0.6;
-    h += duneProfile(rx/41.0 + 0.25*vnoise(q*0.01 + vec2(4.0)))*3.2*vnoise(q*0.008 + vec2(9.0,2.0));
+    h += duneProfile(rx/41.0 + 0.25*vnoise(q*0.01 + vec2(4.0)))*3.2*vnoise(q*0.008 + vec2(9.0,2.0))*(1.0 - 0.75*flatK);
     h += wormBulge(p);
   }
   return h;
@@ -1231,6 +1244,9 @@ class Cloak {
   step(dt, frame, colliders, wind, ground, time) {
     const { pos, prev, acc, cols, n, fixed, soft, tgt, tgtIdx, layout } = this;
     const e = frame.matrixWorld.elements;
+    this.frameE = e;
+    this.frameInv = (this.frameInv || new THREE.Matrix4()).copy(frame.matrixWorld).invert();
+    this.frameInvE = this.frameInv.elements;
     for (const k of tgtIdx) {
       const x = layout[k * 3], y = layout[k * 3 + 1], z = layout[k * 3 + 2];
       tgt[k * 3] = e[0] * x + e[4] * y + e[8] * z + e[12];
@@ -1290,13 +1306,19 @@ class Cloak {
     }
   }
   collide(colliders, ground) {
-    const { pos, n, fixed } = this;
+    const { pos, n, fixed } = this, fe = this.frameE, ie = this.frameInvE;
     for (let k = 0; k < n; k++) {
-      if (fixed[k]) continue;
+      const fx = fixed[k] === 1;
       const p = k * 3;
       let x = pos[p], y = pos[p + 1], z = pos[p + 2];
+      // keep the cape behind him: no free cloth forward of the torso's midplane
+      if (!fx && ie) {
+        const lz = ie[2] * x + ie[6] * y + ie[10] * z + ie[14];
+        if (lz > 0.0) { x -= fe[8] * lz; y -= fe[9] * lz; z -= fe[10] * lz; }
+      }
       for (let c = 0; c < colliders.length; c++) {
         const C = colliders[c];
+        if (fx && !C.arm) continue;
         const abx = C.b.x - C.a.x, aby = C.b.y - C.a.y, abz = C.b.z - C.a.z;
         const apx = x - C.a.x, apy = y - C.a.y, apz = z - C.a.z;
         const ll = abx * abx + aby * aby + abz * abz;
@@ -1306,6 +1328,7 @@ class Cloak {
         const d2 = dx * dx + dy * dy + dz * dz, r = C.r + 0.018;
         if (d2 < r * r) { const d = Math.sqrt(d2) + 1e-9; x = cx + dx / d * r; y = cy + dy / d * r; z = cz + dz / d * r; }
       }
+      if (fx) { pos[p] = x; pos[p + 1] = y; pos[p + 2] = z; continue; }
       const gy = ground.h + ground.gx * (x - ground.x) + ground.gz * (z - ground.z) + 0.02;
       if (y < gy) { y = gy; this.prev[p] = lerp(this.prev[p], x, 0.6); this.prev[p + 2] = lerp(this.prev[p + 2], z, 0.6); }
       pos[p] = x; pos[p + 1] = y; pos[p + 2] = z;
@@ -1519,7 +1542,7 @@ class Character {
       f.plant.y = terrainH(f.plant.x, f.plant.z) + this.ankleH;
       f.pos.copy(f.plant); f.lift.copy(f.plant);
     }
-    this.cloak = new Cloak(model ? { pinY: 0.36, rx: 0.27, rz: 0.22, len: 1.14, arc: 2.2 } : {});
+    this.cloak = new Cloak(model ? { pinY: 0.36, rx: 0.27, rz: 0.22, len: 1.14, arc: 1.85 } : {});
     scene.add(this.cloak.mesh);
     this.colliders = [];
     this.onStep = null;
@@ -2049,7 +2072,7 @@ class Character {
       c.push({ a: L(this.spine, 0.16, 0.37, -0.02), b: L(this.spine, 0.13, 0.18, -0.07), r: 0.13 });
       c.push({ a: L(this.spine, -0.16, 0.37, -0.02), b: L(this.spine, -0.13, 0.18, -0.07), r: 0.13 });
       for (const arm of this.arms) {
-        c.push({ a: arm.wS, b: arm.wS, r: 0.1 }, { a: arm.wS, b: arm.wE, r: 0.08 }, { a: arm.wE, b: arm.wH, r: 0.065 });
+        c.push({ a: arm.wS, b: arm.wS, r: 0.105, arm: true }, { a: arm.wS, b: arm.wE, r: 0.095, arm: true }, { a: arm.wE, b: arm.wH, r: 0.08, arm: true }, { a: arm.wH, b: arm.wH, r: 0.075, arm: true });
       }
     } else {
       c.push({ a: L(this.spine, 0.075, 0.04, 0), b: L(this.spine, 0.075, 0.34, -0.01), r: 0.125 });
@@ -2877,7 +2900,8 @@ function wormMeshUpdate(W) {
 }
 
 const WORM_COMPRESS = 0.88, WORM_DEPTH = 78;
-const wormState = { phase: 'idle', type: null, t: 0, next: 24, stage: '', trail: [], trailS: [], sHead: 0, head: new V3(),
+const wormState = { phase: 'active', type: 'ambient', mode: 'cruise', inited: false, t: 0, next: 45, nextBreach: 22, stage: 'travel',
+  speed: 38, pitch: 0, yawVel: 0, pitchVel: 0, vel: new V3(), apex: false, prevAbove: -99, breachH: 40, trail: [], trailS: [], sHead: 0, head: new V3(),
   dir: new V3(1, 0, 0), heading: 0, target: new V3(), riseBase: new V3(), riseT: 0, H: 200, depth: WORM_DEPTH,
   burstA: 0, burstB: 0, burstPosA: new V3(), burstPosB: new V3(), freeze: false, shake: 0, gustBoost: 0, noise: 0,
   lastType: '', lastClose: -999, queue: ['rise'], az: 0, center: new V3(), arcH: 0, cam: 0 };
@@ -2911,7 +2935,7 @@ function updateDeath(dt, t) {
   msg.style.opacity = death.t > T0 + 2.6 && death.t < T0 + 6 ? 1 : 0;
   if (!death.woke && death.t > T0 + 5) {
     death.woke = true;
-    if (W.phase === 'active') { W.phase = 'idle'; worm.visible = false; W.next = t + 60; W.freeze = false; W.cam = 0; W.shake = 0; }
+    W.type = 'ambient'; W.cam = 0; W.freeze = false; W.shake = 0; W.next = t + 60;
     // wake a little way off, facing away from the pit
     const away = hero.pos.clone().sub(W.riseBase).setY(0); if (away.lengthSq() < 1) away.set(1, 0, 0);
     away.normalize();
@@ -2949,7 +2973,7 @@ const thumper = (() => {
 })();
 function plantThumper(t) {
   const T = thumper;
-  if (T.active || wormState.phase !== 'idle') { toast(T.active ? 'The thumper is already calling' : 'Wait — a worm is already moving'); return; }
+  if (T.active || wormState.type !== 'ambient') { toast(T.active ? 'The thumper is already calling' : 'Wait — a worm is already moving'); return; }
   const fw = hero.forward();
   T.pos.set(hero.pos.x + fw.x * 1.4, 0, hero.pos.z + fw.z * 1.4);
   T.pos.y = terrainH(T.pos.x, T.pos.z);
@@ -2978,7 +3002,7 @@ function updateThumper(dt, t) {
     audioThump(T.pos);
   }
   // after a while the worm answers
-  if (!T.called && T.t > 8 && wormState.phase === 'idle') { T.called = true; startWorm('thumper', t); }
+  if (!T.called && T.t > 8 && wormState.type === 'ambient') { T.called = true; startWorm('thumper', t); }
   if (T.swallowed) { T.sink += dt * 12; if (T.sink > 6) { T.active = false; T.g.visible = false; T.swallowed = false; wormState.next = t + 70; } }
 }
 function spawnPuffRing(p) {
@@ -2992,7 +3016,7 @@ function spawnPuffRing(p) {
 }
 
 // Dust devils wander the middle distance
-const DEVILS = [0, 1, 2, 3].map(i => ({ az: Math.random() * Math.PI * 2, dist: 180 + i * 150, phase: i * 13 + Math.random() * 8, pos: new V3() }));
+const DEVILS = [0, 1, 2].map(i => ({ az: Math.random() * Math.PI * 2, dist: 220 + i * 190, phase: i * 17 + Math.random() * 8, pos: new V3() }));
 const spice = { next: 55, t: -1, pos: new V3(), az: 0, dist: 0 };
 
 // Dust plumes (GPU billboards), lit with forward scattering
@@ -3977,7 +4001,7 @@ function updateWorld(dt, t) {
     if (flyby.active && flyby.pos.distanceTo(hero.pos) < 800) lt = flyby.pos;
     else if (wormState.phase === 'active') {
       const f = wormFocus();
-      if (wormState.stage !== 'travel' || wormState.type === 'breach' || f.distanceTo(hero.pos) < 1400) lt = f;
+      if (wormState.stage !== 'travel' || (wormState.type !== 'ambient' && f.distanceTo(hero.pos) < 1400)) lt = f;
     }
     if (!lt && thumper.active && thumper.flee === 0) lt = thumper.pos.clone().add(new V3(0, 1.5, 0));
     if (!lt) {
@@ -4080,7 +4104,7 @@ function updateWorld(dt, t) {
     const x = p.x + Math.sin(dv.az) * dv.dist, z = p.z + Math.cos(dv.az) * dv.dist;
     dv.pos.set(x, terrainH(x, z) - 2, z);
     const life = ((t + dv.phase) % 48) / 48;
-    const amt = smooth(0.0, 0.1, life) * smooth(1.0, 0.85, life) * (1 + weather.S);
+    const amt = smooth(0.0, 0.08, life) * smooth(0.62, 0.5, life) * (1 + weather.S);   // each devil lives ~half its cycle
     for (const e of [24 + i * 2, 25 + i * 2]) { emitPos[e].copy(dv.pos); emitKind[e] = 4; emitAmt[e] = amt; }
     if (life < 0.01) { dv.az = Math.random() * Math.PI * 2; }
   });
@@ -4098,7 +4122,7 @@ function updateWorld(dt, t) {
   }
 
   audioUpdate(SH.uGust.value);
-  audioScore(wormState.phase === 'active' ? (wormState.stage === 'travel' ? 0.6 : 1) : thumper.active ? 0.35 : 0, skyMat.uniforms.uNight.value > 0.5);
+  audioScore(wormState.type !== 'ambient' ? (wormState.stage === 'travel' ? 0.6 : 1) : wormState.stage !== 'travel' ? 0.45 : thumper.active ? 0.35 : 0, skyMat.uniforms.uNight.value > 0.5);
 }
 // ---- Sandworm encounters --------------------------------------------------------------
 // The body follows the trail its head carves through the sand, so any scripted head motion
@@ -4146,92 +4170,67 @@ function wormTravel(W, dt, speed, steerTo, turnRate = 0.25) {
   const x = W.head.x + W.dir.x * speed * dt, z = W.head.z + W.dir.z * speed * dt;
   wormAdvance(W, new V3(x, wormGround(x, z) - W.depth, z));
 }
+const WORM_CRUISE = 66;   // cruising depth of the head; deep enough that the 40 m body stays under the dunes
+// The head is steered like a heavy body: turn rate, pitch rate and speed all carry momentum, and the
+// rest of the worm simply follows the path the head has carved.
+function wormFly(W, dt, yawTo, pitchWant, speedWant, turn = 0.3) {
+  if (yawTo !== null) W.yawVel = damp(W.yawVel, clamp(wrapAngle(yawTo - W.heading) * 0.9, -turn, turn), 1.1, dt);
+  else W.yawVel = damp(W.yawVel, 0, 0.8, dt);
+  W.heading += W.yawVel * dt;
+  W.pitchVel = damp(W.pitchVel, clamp((pitchWant - W.pitch) * 1.3, -0.55, 0.55), 1.5, dt);
+  W.pitch = clamp(W.pitch + W.pitchVel * dt, -1.3, 1.3);
+  W.speed = damp(W.speed, speedWant, 0.6, dt);
+  const cp = Math.cos(W.pitch);
+  W.dir.set(Math.sin(W.heading), 0, Math.cos(W.heading));
+  W.vel.set(W.dir.x * cp, Math.sin(W.pitch), W.dir.z * cp).multiplyScalar(W.speed);
+  wormAdvance(W, W.head.clone().addScaledVector(W.vel, dt));
+}
+// follow the lie of the land at a depth, looking ahead so it glides rather than tracks every dune
+function wormCruisePitch(W, depth) {
+  const ax = W.head.x + W.dir.x * 80, az = W.head.z + W.dir.z * 80;
+  return clamp(Math.atan2(wormGround(ax, az) - depth - W.head.y, 80), -0.32, 0.32);
+}
+// bring the worm in from beyond the haze, already moving, aimed at a point
+function wormPlace(W, target, dist, az) {
+  const start = new V3(target.x + Math.sin(az) * dist, 0, target.z + Math.cos(az) * dist);
+  W.heading = Math.atan2(target.x - start.x, target.z - start.z);
+  W.dir.set(Math.sin(W.heading), 0, Math.cos(W.heading));
+  start.y = wormGround(start.x, start.z) - WORM_CRUISE;
+  wormTrailReset(W, start, W.dir.clone().negate().add(new V3(0, -0.12, 0)).normalize());
+  W.mode = 'cruise'; W.apex = false; W.pitch = 0; W.pitchVel = 0; W.yawVel = 0; W.speed = 40; W.prevAbove = -99;
+}
 function startWorm(type, t) {
   const W = wormState, p = hero.pos;
-  W.phase = 'active'; W.type = type; W.t = 0; W.stage = 'travel'; W.headU = null; W.depth = WORM_DEPTH; W.freeze = false;
-  W.lastType = type; W.burstA = W.burstB = 0; W.H = 170 + Math.random() * 60;
+  if (type === 'wave' || type === 'breach') { W.nextBreach = t; return; }   // the ambient worm does these on its own
   const camF = new V3(); camera.getWorldDirection(camF); camF.y = 0; camF.normalize();
-  let start, heading;
+  const camYaw = Math.atan2(camF.x, camF.z);
   const azOf = (az, d) => new V3(p.x + Math.sin(az) * d, 0, p.z + Math.cos(az) * d);
-  if (type === 'wave') {
-    const az = HARVESTERS[Math.floor(Math.random() * 3)].az + (Math.random() - 0.5) * 0.6;
-    start = azOf(az, 1300 + Math.random() * 400);
-    heading = az + Math.PI * 0.5 * (Math.random() < 0.5 ? 1 : -1) + (Math.random() - 0.5) * 0.6;
-    toast('Wormsign');
-  } else if (type === 'rise') {
-    const az = HARVESTERS[Math.floor(Math.random() * 3)].az + (Math.random() - 0.5) * 0.7;
-    W.target.copy(azOf(az, 950 + Math.random() * 350));
-    const off = (Math.random() < 0.5 ? 1 : -1) * (0.6 + Math.random() * 0.5);
-    start = W.target.clone().add(new V3(Math.sin(az + off) * 650, 0, Math.cos(az + off) * 650));
-    heading = Math.atan2(W.target.x - start.x, W.target.z - start.z);
-    toast('Wormsign');
-  } else if (type === 'harvester') {
-    const hp = HARVESTERS[0].group.position;
-    const a = Math.random() * Math.PI * 2;
-    start = new V3(hp.x + Math.sin(a) * 880, 0, hp.z + Math.cos(a) * 880);
-    heading = Math.atan2(hp.x - start.x, hp.z - start.z);
-    carry.state = 'dock'; carry.t = 0;
+  W.type = type; W.t = 0; W.lastType = type; W.freeze = false; W.locked = false;
+  W.H = 80 + Math.random() * 25;
+  if (type === 'rise') { W.target.copy(azOf(camYaw + (Math.random() - 0.5) * 1.1, 650 + Math.random() * 350)); toast('Wormsign'); }
+  else if (type === 'harvester') {
+    const hp = HARVESTERS[0].group.position; W.target.set(hp.x, 0, hp.z);
+    carry.state = 'dock'; carry.t = 0; W.H = 95;
     toast('Wormsign near the harvester · carryall inbound');
-  } else if (type === 'breach') {
-    W.az = HARVESTERS[Math.floor(Math.random() * 3)].az + (Math.random() - 0.5) * 0.5;
-    W.center.copy(azOf(W.az, 1400 + Math.random() * 400));
-    heading = W.az + Math.PI * 0.5 + (Math.random() - 0.5) * 0.6;
-    W.dir.set(Math.sin(heading), 0, Math.cos(heading));
-    W.arcH = -420;
-    start = W.center.clone().addScaledVector(W.dir, W.arcH - 490);
-    toast('Wormsign');
-  } else if (type === 'hunt') {
-    W.target.set(p.x, 0, p.z); W.locked = false;
-    const a = Math.atan2(camF.x, camF.z) + (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 0.6);
-    start = W.target.clone().add(new V3(Math.sin(a) * 1400, 0, Math.cos(a) * 1400));
-    heading = Math.atan2(W.target.x - start.x, W.target.z - start.z);
-    W.H = 260; W.lastClose = t;
-    toast('Wormsign · it is hunting you');
-  } else if (type === 'thumper') {
-    W.target.set(thumper.pos.x, 0, thumper.pos.z);
-    const a = Math.random() * Math.PI * 2;
-    start = W.target.clone().add(new V3(Math.sin(a) * 1150, 0, Math.cos(a) * 1150));
-    heading = Math.atan2(W.target.x - start.x, W.target.z - start.z);
-    W.H = 250; W.lastClose = t;
-    toast('Wormsign · it answers the thumper');
-  } else { // close encounter: arrives from the side of the view and surfaces a few hundred metres away
+  } else if (type === 'hunt') { W.target.set(p.x, 0, p.z); W.H = 95; W.lastClose = t; toast('Wormsign · it is hunting you'); }
+  else if (type === 'thumper') { W.target.set(thumper.pos.x, 0, thumper.pos.z); W.H = 95; W.lastClose = t; toast('Wormsign · it answers the thumper'); }
+  else {   // close: surfaces a few hundred metres ahead of the camera
     const side = Math.random() < 0.5 ? 1 : -1;
-    const pass = new V3(p.x, 0, p.z).addScaledVector(camF, 330).add(new V3(-camF.z, 0, camF.x).multiplyScalar(side * 90));
-    W.target.copy(pass);
-    const ang = Math.atan2(camF.x, camF.z) + side * (1.1 + Math.random() * 0.4);
-    start = pass.clone().add(new V3(Math.sin(ang) * 1100, 0, Math.cos(ang) * 1100));
-    heading = Math.atan2(pass.x - start.x, pass.z - start.z);
-    W.H = 230; W.lastClose = t;
+    W.target.copy(new V3(p.x, 0, p.z).addScaledVector(camF, 330).add(new V3(-camF.z, 0, camF.x).multiplyScalar(side * 90)));
+    W.H = 90; W.lastClose = t; W.type = 'close';
     toast('Wormsign · close');
   }
-  W.heading = heading;
-  W.dir.set(Math.sin(heading), 0, Math.cos(heading));
-  start.y = wormGround(start.x, start.z) - (type === 'breach' ? 160 : W.depth);
-  wormTrailReset(W, start, W.dir.clone().negate().add(new V3(0, -0.35, 0)).normalize());
-  const big = type === 'close' || type === 'thumper' || type === 'hunt';
+  // if it is badly placed (too far to arrive in time, or right on top of the spot) and fully buried, bring it in fresh
+  const d = Math.hypot(W.target.x - W.head.x, W.target.z - W.head.z);
+  if ((d > 1500 || d < 260) && W.mode === 'cruise' && W.head.y < wormGround(W.head.x, W.head.z) - 40)
+    wormPlace(W, W.target, type === 'harvester' ? 880 : 1100, camYaw + (Math.random() < 0.5 ? 1 : -1) * (1.0 + Math.random() * 0.5));
+  const big = W.type === 'close' || type === 'thumper' || type === 'hunt';
   audioRumble(big ? 1.6 : 0.8, big ? 26 : 14);
   if (ui.cinematic) W.cam = 1;
 }
-function wormRiseUpdate(W, dt, sinkSpeed = 55) {
-  // stages: travel → rise → hold → sink → done
-  const g = wormGround(W.riseBase.x, W.riseBase.z);
-  if (W.stage === 'rise') {
-    W.riseT += dt;
-    const k = smooth(0, 1, W.riseT / 4.2);
-    const lean = W.dir.clone().multiplyScalar(-18 * k);
-    wormAdvance(W, new V3(W.riseBase.x + lean.x, g - W.depth + (W.depth + W.H) * k, W.riseBase.z + lean.z));
-    if (W.riseT > 4.2) { W.stage = 'hold'; W.riseT = 0; }
-  } else if (W.stage === 'hold') {
-    W.riseT += dt;
-    const a = W.riseT * 0.9;
-    // keep reaching slowly upward with a gentle sway; big loops here would coil the neck behind the head
-    wormAdvance(W, new V3(W.riseBase.x + Math.sin(a) * 4 - W.dir.x * 18, g + W.H + W.riseT * 2.5 + Math.sin(a * 1.3) * 2, W.riseBase.z + Math.sin(a * 0.8) * 3 - W.dir.z * 18));
-    if (W.riseT > 6.5) { W.stage = 'sink'; }
-  } else if (W.stage === 'sink') {
-    W.sHead -= sinkSpeed * dt;
-    wormTrailAt(W, W.sHead, W.head);
-    if (W.head.y < g - W.depth - 30 || W.head.y < wormGround(W.head.x, W.head.z) - W.depth * 0.85 || W.sHead < W.trailS[0] - 200) { W.stage = 'done'; W.burstB = 1; W.burstPosB.set(W.riseBase.x, g, W.riseBase.z); }
-  }
+function wormEndEvent(W, t) {
+  W.type = 'ambient'; W.cam = 0; W.freeze = false;
+  W.next = t + 55 + Math.random() * 35; W.nextBreach = t + 18 + Math.random() * 15;
 }
 function updateWorm(dt, t) {
   const W = wormState;
@@ -4253,73 +4252,112 @@ function updateWorm(dt, t) {
   W.burstA = damp(W.burstA, 0, 0.25, dt); W.burstB = damp(W.burstB, 0, 0.25, dt);
   emitPos[8].copy(W.burstPosA); emitKind[8] = 2; emitAmt[8] = W.burstA;
   emitPos[9].copy(W.burstPosB); emitKind[9] = 2; emitAmt[9] = W.burstB;
-  if (W.phase === 'idle') {
-    if (W.noise > 14 && t - W.lastClose > 60 && W.next > t + 8 && !thumper.active) {
-      const warned = W.warnedAt && t - W.warnedAt < 240;
-      W.next = t + 6; W.queue.unshift(warned ? 'hunt' : 'close'); W.noise = 0; W.warnedAt = t;
-      toast(warned ? 'You were warned…' : 'Your rhythm carries through the sand…');
-    }
-    worm.visible = false; W.freeze = false; W.cam = 0;
-    if (t < W.next) return;
-    let type = W.queue.shift();
-    if (!type) {
-      const pool = [['wave', 0.24], ['rise', 0.26], ['harvester', 0.18], ['breach', 0.14], ['close', t - W.lastClose > 150 ? 0.18 : 0]];
-      do {
-        let r = Math.random() * pool.reduce((a, b) => a + b[1], 0);
-        type = pool.find(e => (r -= e[1]) <= 0)[0];
-      } while (type === W.lastType && Math.random() < 0.8);
-    }
-    startWorm(type, t);
+  const camF = new V3(); camera.getWorldDirection(camF); camF.y = 0; camF.normalize();
+  if (!W.inited || W.head.distanceTo(p) > 2800) {
+    W.inited = true;
+    const a = Math.atan2(camF.x, camF.z) + (Math.random() < 0.5 ? 0.5 : -0.5);
+    wormPlace(W, new V3(p.x + Math.sin(a) * 800, 0, p.z + Math.cos(a) * 800), 700, a + Math.PI * 0.5);
   }
   W.t += dt;
+  const ev = W.type !== 'ambient';
+  // schedule encounters (the walker's own rhythm can call one, and a second warning brings a hunter)
+  if (!ev && W.mode === 'cruise') {
+    if (W.noise > 14 && t - W.lastClose > 60 && !thumper.active) {
+      const warned = W.warnedAt && t - W.warnedAt < 240;
+      W.queue.unshift(warned ? 'hunt' : 'close'); W.next = Math.min(W.next, t + 4); W.noise = 0; W.warnedAt = t;
+      toast(warned ? 'You were warned…' : 'Your rhythm carries through the sand…');
+    }
+    if (t > W.next && !thumper.active) {
+      let type = W.queue.shift();
+      if (!type) {
+        const pool = [['rise', 0.4], ['harvester', 0.3], ['close', t - W.lastClose > 150 ? 0.3 : 0]];
+        do { let r = Math.random() * pool.reduce((a, b) => a + b[1], 0); type = pool.find(e => (r -= e[1]) <= 0)[0]; }
+        while (type === W.lastType && Math.random() < 0.7);
+      }
+      startWorm(type, t);
+    }
+  }
   const T = W.type;
-  if (T === 'wave') {
-    if (W.t > 40) W.depth = lerp(WORM_DEPTH, 190, smooth(40, 47, W.t));
-    wormTravel(W, dt, 48);
-    if (W.t > 48) W.stage = 'done';
-  } else if (T === 'breach') {
-    W.arcH += 60 * dt;
-    const arcL = 980, A = 270, kk = A * Math.PI / arcL, h = W.arcH;
-    const y = h < 0 ? Math.max(-200, kk * h * 0.8) : h <= arcL ? A * Math.sin(Math.PI * h / arcL) : Math.max(-200, -kk * (h - arcL) * 0.8);
-    const q = W.center.clone().addScaledVector(W.dir, h - arcL * 0.5);
-    const g = wormGround(q.x, q.z);
-    wormAdvance(W, new V3(q.x, g + y, q.z));
-    if (h > 0 && h < 6 && W.burstA < 0.5) { W.burstA = 1; W.burstPosA.set(q.x, g, q.z); }
-    if (h > arcL && h < arcL + 6 && W.burstB < 0.5) { W.burstB = 1; W.burstPosB.set(q.x, g, q.z); }
-    if (h > arcL + 300 + wormBodyLen()) W.stage = 'done';
-  } else {
-    // rise / harvester / close: tunnel to a spot, then thrust the head skyward
-    if (T === 'harvester') { const hp = HARVESTERS[0].group.position; W.target.set(hp.x, 0, hp.z); }
-    if (W.stage === 'travel') {
+  const gH = wormGround(W.head.x, W.head.z), above = W.head.y - gH;
+  const dh = Math.hypot(W.head.x - p.x, W.head.z - p.z);
+  let yawTo = null, pitchWant = 0, speedWant = 40, turn = 0.28;
+  if (W.mode === 'cruise') {
+    let tgt = null;
+    if (ev) {
+      if (T === 'harvester') { const hp = HARVESTERS[0].group.position; W.target.set(hp.x, 0, hp.z); }
       if (T === 'hunt' && !W.locked) {
         // it follows the walker's rhythm until it is close, then commits to where it last felt them
         W.target.set(p.x, 0, p.z);
-        if (Math.hypot(W.head.x - p.x, W.head.z - p.z) < 620) { W.locked = true; toast('It has your scent · run'); }
+        if (dh < 620) { W.locked = true; toast('It has your scent · run'); }
       }
-      const speed = T === 'harvester' ? 37 : T === 'close' ? 52 : T === 'thumper' ? 64 : T === 'hunt' ? 56 : 50;
-      wormTravel(W, dt, speed, W.target, T === 'harvester' ? 0.6 : 0.4);
-      const dx = W.target.x - W.head.x, dz = W.target.z - W.head.z;
+      tgt = W.target; turn = 0.42;
+      speedWant = T === 'harvester' ? 37 : T === 'close' ? 50 : T === 'thumper' ? 60 : T === 'hunt' ? 54 : 48;
+      const d = Math.hypot(W.target.x - W.head.x, W.target.z - W.head.z);
       const ready = T === 'harvester' ? (carry.lift > 200 || W.t > 34) : true;
-      if (Math.hypot(dx, dz) < (T === 'harvester' ? 30 : T === 'thumper' || T === 'hunt' ? 22 : 60) && ready) {
-        W.stage = 'rise'; W.riseT = 0; W.riseBase.set(W.head.x, 0, W.head.z);
-        W.burstA = 1; W.burstPosA.set(W.head.x, wormGround(W.head.x, W.head.z), W.head.z);
-        if (T === 'close' || T === 'thumper' || T === 'hunt') { W.shake = 1.0; W.gustBoost = 1.2; audioRumble(2.0, 12); }
-        if (T === 'thumper') W.riseBase.set(thumper.pos.x, 0, thumper.pos.z);
-        audioRoar(T === 'close' || T === 'thumper' || T === 'hunt' ? 1.4 : 0.7);
-        if (T === 'harvester') W.H = Math.min(W.H, 215);
-      } else if (Math.hypot(dx, dz) < 60 && !ready) {
-        W.heading += dt * 0.9;   // circle beneath the harvester until it is lifted clear
+      if (!ready && d < 160) { tgt = null; W.yawVel = damp(W.yawVel, 0.3, 1, dt); }   // circle beneath until it is lifted clear
+      // close enough to come up under the spot (and roughly pointed at it): commit to the surge
+      const facing = Math.cos(wrapAngle(Math.atan2(W.target.x - W.head.x, W.target.z - W.head.z) - W.heading));
+      if (ready && d < WORM_CRUISE * 1.3 + W.speed * 1.1 && facing > 0.6) { W.mode = 'surge'; W.apex = false; }
+    } else {
+      // ambient: wander a broad arc in front of the camera, never closing on the walker
+      const camYaw = Math.atan2(camF.x, camF.z);
+      const az = camYaw + Math.sin(t * 0.043) * 0.75 + Math.sin(t * 0.017 + 1.0) * 0.45;
+      const R = 720 + 260 * Math.sin(t * 0.029);
+      tgt = new V3(p.x + Math.sin(az) * R, 0, p.z + Math.cos(az) * R);
+      if (dh < 340) tgt = W.head.clone().add(W.head.clone().sub(p).setY(0).normalize().multiplyScalar(400));
+      speedWant = 36 + 7 * Math.sin(t * 0.07);
+      const toW = new V3(W.head.x - p.x, 0, W.head.z - p.z).normalize();
+      if (t > W.nextBreach && dh > 320 && dh < 1400 && toW.dot(camF) > 0.55) {
+        W.mode = 'breach'; W.apex = false; W.breachH = 30 + Math.random() * 25;
+        if (ui.cinematic && dh < 1200) W.cam = 1;
       }
-    } else wormRiseUpdate(W, dt);
+    }
+    if (tgt) yawTo = Math.atan2(tgt.x - W.head.x, tgt.z - W.head.z);
+    pitchWant = wormCruisePitch(W, WORM_CRUISE);
+  } else if (W.mode === 'breach') {
+    // a shallow leap: angle up through the sand, arc over and dive back in, all with forward momentum
+    speedWant = 34; turn = 0.1;
+    if (!W.apex) { pitchWant = 0.6; if (above > W.breachH * 0.5) W.apex = true; }
+    else {
+      pitchWant = -0.75;
+      if (above < -WORM_CRUISE * 0.75) { W.mode = 'cruise'; W.apex = false; W.nextBreach = t + 20 + Math.random() * 25; if (!ev) W.cam = 0; }
+    }
+  } else if (W.mode === 'surge') {
+    // an encounter: home onto the spot from below, lunge up steeply, lose speed, arch over and dive ahead
+    const d = Math.hypot(W.target.x - W.head.x, W.target.z - W.head.z);
+    if (above < 0 && !W.apex) {
+      yawTo = Math.atan2(W.target.x - W.head.x, W.target.z - W.head.z); turn = 0.55;
+      pitchWant = clamp(Math.atan2(-above + 6, Math.max(d, 4)), 0.15, 1.2);
+      speedWant = 46;
+    } else if (!W.apex) {
+      pitchWant = 1.05; speedWant = lerp(44, 16, smooth(0, W.H, above)); turn = 0.05;
+      if (above > W.H * 0.55 || W.speed < 19) W.apex = true;
+    } else {
+      pitchWant = -1.05; speedWant = 36; turn = 0.05;
+      if (above < -WORM_CRUISE * 0.75) { W.mode = 'cruise'; W.apex = false; wormEndEvent(W, t); }
+    }
+  }
+  wormFly(W, dt, yawTo, pitchWant, speedWant, turn);
+  // surface crossings: bursts of sand, and the point it broke through (the encounter's focus)
+  {
+    const g2 = wormGround(W.head.x, W.head.z), a2 = W.head.y - g2;
+    if (W.prevAbove < 0 && a2 >= 0) {
+      W.riseBase.set(W.head.x, 0, W.head.z); W.riseT = 0;
+      W.burstA = 1; W.burstPosA.set(W.head.x, g2, W.head.z);
+      if (W.mode === 'surge' && (T === 'close' || T === 'thumper' || T === 'hunt')) { W.shake = 1.0; W.gustBoost = 1.2; audioRumble(2.0, 12); }
+      audioRoar(W.mode === 'surge' ? (T === 'close' || T === 'thumper' || T === 'hunt' ? 1.4 : 0.8) : 0.45);
+    }
+    if (W.prevAbove >= 0 && a2 < 0) { W.burstB = 1; W.burstPosB.set(W.head.x, g2, W.head.z); }
+    W.prevAbove = a2; W.riseT += dt;
+    W.stage = a2 > 0 ? (W.vel.y > 0 ? 'rise' : 'sink') : 'travel';
   }
   if (T === 'close' || T === 'thumper' || T === 'hunt') {
-    const d = Math.hypot(W.head.x - p.x, W.head.z - p.z);
-    W.freeze = W.stage !== 'done' && d < 1000 && T === 'close';
-    W.shake = Math.max(W.shake, smooth(900, 250, d) * 0.45 * (W.stage === 'travel' ? 1 : 0.6));
-    if (T === 'thumper' && thumper.active && !thumper.swallowed && W.stage === 'rise' && W.riseT > 0.6) thumper.swallowed = true;
+    W.freeze = dh < 1000 && T === 'close' && W.mode !== 'cruise' || (T === 'close' && dh < 700);
+    W.shake = Math.max(W.shake, smooth(900, 250, dh) * 0.45 * (W.stage === 'travel' ? 1 : 0.6));
+    if (T === 'thumper' && thumper.active && !thumper.swallowed && W.stage === 'rise' && W.riseT > 0.4) thumper.swallowed = true;
   }
   // the mouth flares open as it breaks the surface
-  W.mouth = damp(W.mouth ?? 0, (W.stage === 'rise' || W.stage === 'hold') ? 1 : 0.1, 1.6, dt);
+  W.mouth = damp(W.mouth ?? 0, W.mode !== 'cruise' && !W.apex && W.head.y > wormGround(W.head.x, W.head.z) - 25 ? 1 : W.stage !== 'travel' ? 0.45 : 0.1, 1.4, dt);
   // leave a fading scar of churned sand along shallow tunnelling
   {
     const depth = wormGround(W.head.x, W.head.z) - W.head.y;
@@ -4336,7 +4374,7 @@ function updateWorm(dt, t) {
     const depth = g - W.head.y;
     let amp = depth > 0 ? 11 * smooth(170, WORM_DEPTH, depth) : 0;
     let mx = W.head.x, mz = W.head.z;
-    if (W.stage === 'rise' || W.stage === 'hold' || W.stage === 'sink') { amp = 14; mx = W.riseBase.x; mz = W.riseBase.z; }
+    if (W.stage === 'rise' || W.stage === 'sink') { amp = 12; mx = W.riseBase.x; mz = W.riseBase.z; }
     if (amp > 0.2) {
       SH.uWormB.value.set(mx, mz, amp, 75); SH.uWormD.value.set(W.dir.x, W.dir.z);
       emitPos[20].set(mx + W.dir.x * 40, wormGround(mx, mz) + amp, mz + W.dir.z * 40); emitKind[20] = 6;
@@ -4351,10 +4389,6 @@ function updateWorm(dt, t) {
     const above = _wp.y - wormGround(_wp.x, _wp.z);
     emitPos[10 + ce].set(_wp.x, _wp.y + WORM_R * 0.9, _wp.z); emitKind[10 + ce] = 3;
     emitAmt[10 + ce] = smooth(5, 70, above);
-  }
-  if (W.stage === 'done') {
-    W.phase = 'idle'; worm.visible = false; W.freeze = false; W.cam = 0;
-    W.next = t + 45 + Math.random() * 35;
   }
 }
 const _wp = new V3(), _wn = new V3(), _wq = new THREE.Quaternion();
