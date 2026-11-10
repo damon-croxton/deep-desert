@@ -237,11 +237,12 @@ float duneProfile(float u){
   float t = (p-0.72)/0.28; return (1.0-t)*(1.0-t);
 }
 uniform vec4 uWormB; uniform vec2 uWormD;
-uniform vec4 uScar[20];
+uniform vec4 uScar[20]; uniform int uScarN;
 float wormScar(vec2 p){
   // churned ridge left along a worm's path, fading over a couple of minutes
   float h = 0.0;
   for (int i = 0; i < 20; i++){
+    if (i >= uScarN) break;
     if (uScar[i].z <= 0.0) continue;
     vec2 d = p - uScar[i].xy;
     h += uScar[i].z * exp(-dot(d, d) / 2400.0);
@@ -475,6 +476,7 @@ const SH = {
   uCloudSun: { value: new V3(1, 1, 1) },
   uWormD: { value: new THREE.Vector2(1, 0) },
   uScar: { value: Array.from({ length: 20 }, () => new THREE.Vector4()) },
+  uScarN: { value: 0 },
   uThump: { value: new THREE.Vector4(0, 0, -99, 0) },
 };
 const KEY_UNIFORMS_GLSL = `uniform vec3 uKeyDir; uniform vec3 uKeyColor; uniform vec3 uAmbSky; uniform vec3 uAmbGround; uniform float uTime; uniform vec3 uWind; uniform float uGust;`;
@@ -824,7 +826,11 @@ function updateEnv() {
    ===================================================================== */
 const GRID_N = 640, GRID_R = 4600, GRID_A = 0.012;
 const GRID_STEP = GRID_R * GRID_A * 2 / (GRID_N - 1);
-function buildTerrainGeometry() {
+// The grid is cut into sectors so the ones outside the view are culled, and every sector's
+// triangles (and the sectors themselves) are ordered from the camera outwards: near sand is drawn
+// first and the depth test rejects the dunes hidden behind it before their shader runs.
+const TERRAIN_SECTORS = 8;
+function buildTerrain(material) {
   const N = GRID_N, pos = new Float32Array(N * N * 3);
   const map = g => Math.sign(g) * GRID_R * (GRID_A * Math.abs(g) + (1 - GRID_A) * Math.abs(g) ** 3);
   const coords = new Float32Array(N);
@@ -832,17 +838,37 @@ function buildTerrainGeometry() {
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
     const k = (j * N + i) * 3; pos[k] = coords[i]; pos[k + 1] = 0; pos[k + 2] = coords[j];
   }
-  const idx = new Uint32Array((N - 1) * (N - 1) * 6); let t = 0;
-  for (let j = 0; j < N - 1; j++) for (let i = 0; i < N - 1; i++) {
-    const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
-    // split along the shorter diagonal pattern to reduce directional artefacts
-    if ((i + j) & 1) { idx[t++] = a; idx[t++] = c; idx[t++] = b; idx[t++] = b; idx[t++] = c; idx[t++] = d; }
-    else { idx[t++] = a; idx[t++] = c; idx[t++] = d; idx[t++] = a; idx[t++] = d; idx[t++] = b; }
+  const posAttr = new THREE.BufferAttribute(pos, 3);
+  const group = new THREE.Group();
+  const C = TERRAIN_SECTORS, Q = N - 1, mid = (Q - 1) / 2;
+  const edge = k => Math.round(k * Q / C);
+  const ring = q => Math.max(Math.abs((q % Q) - mid), Math.abs(Math.floor(q / Q) - mid));
+  for (let cj = 0; cj < C; cj++) for (let ci = 0; ci < C; ci++) {
+    const i0 = edge(ci), i1 = edge(ci + 1), j0 = edge(cj), j1 = edge(cj + 1);
+    const quads = new Uint32Array((i1 - i0) * (j1 - j0)); let n = 0;
+    for (let j = j0; j < j1; j++) for (let i = i0; i < i1; i++) quads[n++] = j * Q + i;
+    quads.sort((qa, qb) => ring(qa) - ring(qb));
+    const idx = new Uint32Array(quads.length * 6); let t = 0;
+    for (const q of quads) {
+      const i = q % Q, j = (q - i) / Q;
+      const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
+      // alternate the diagonal to reduce directional artefacts
+      if ((i + j) & 1) { idx[t++] = a; idx[t++] = c; idx[t++] = b; idx[t++] = b; idx[t++] = c; idx[t++] = d; }
+      else { idx[t++] = a; idx[t++] = c; idx[t++] = d; idx[t++] = a; idx[t++] = d; idx[t++] = b; }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', posAttr);
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    // bounds: the sector's footprint plus the relief the dunes can reach at that range
+    const x0 = coords[i0], x1 = coords[i1], z0 = coords[j0], z1 = coords[j1];
+    const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, half = Math.hypot(x1 - x0, z1 - z0) / 2;
+    const relief = Math.min(50 + (Math.hypot(cx, cz) + half) * 0.5, 230);
+    g.boundingSphere = new THREE.Sphere(new V3(cx, 0, cz), Math.hypot(half, relief));
+    const m = new THREE.Mesh(g, material);
+    m.renderOrder = 0.1 + 0.01 * Math.max(Math.abs(ci - (C - 1) / 2), Math.abs(cj - (C - 1) / 2));   // after the props, nearest first
+    group.add(m);
   }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setIndex(new THREE.BufferAttribute(idx, 1));
-  return g;
+  return group;
 }
 // Sand that remembers: a 64 m heightfield around the walker (R = depression depth, G = pushed-up rim)
 const DEF_RES = 1024, DEF_SIZE = 64;
@@ -850,8 +876,13 @@ const defOpts = { type: THREE.HalfFloatType, minFilter: THREE.LinearFilter, magF
 const deform = { a: new THREE.WebGLRenderTarget(DEF_RES, DEF_RES, defOpts), b: new THREE.WebGLRenderTarget(DEF_RES, DEF_RES, defOpts),
   origin: new THREE.Vector2(), pending: [], fadeT: 0, ready: false };
 const DEFORM_UNI = { uDeform: { value: deform.a.texture }, uDeformO: { value: new V3(0, 0, DEF_SIZE) } };
+// Cloud shadows: the cirrus density is baked into a small map on the cloud plane (re-centred where
+// the sun's rays from the view meet it), so the sand reads one texel instead of re-running the noise.
+const CLOUD_SH_RES = 512, CLOUD_SH_SIZE = 14000;
+const cloudShRT = new THREE.WebGLRenderTarget(CLOUD_SH_RES, CLOUD_SH_RES, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false });
+const CLOUD_SH_UNI = { uCloudSh: { value: cloudShRT.texture }, uCloudShO: { value: new V3(0, 0, CLOUD_SH_SIZE) } };
 const terrainMat = new THREE.ShaderMaterial({
-  uniforms: { ...SH, ...SHADOW_UNI, ...DEFORM_UNI, uGridOrigin: { value: new THREE.Vector2() }, uGridR: { value: GRID_R } },
+  uniforms: { ...SH, ...SHADOW_UNI, ...DEFORM_UNI, ...CLOUD_SH_UNI, uGridOrigin: { value: new THREE.Vector2() }, uGridR: { value: GRID_R } },
   vertexShader: NOISE_GLSL + /* glsl */`
     uniform vec2 uGridOrigin;
     uniform sampler2D uDeform; uniform vec3 uDeformO;
@@ -869,7 +900,8 @@ const terrainMat = new THREE.ShaderMaterial({
   fragmentShader: NOISE_GLSL + CLOUD_GLSL + HAZE_GLSL + KEY_UNIFORMS_GLSL + SHADOW_GLSL + /* glsl */`
     uniform float uGridR;
     uniform sampler2D uDeform; uniform vec3 uDeformO;
-    uniform vec4 uThump;
+    uniform sampler2D uCloudSh; uniform vec3 uCloudShO;
+    uniform vec4 uThump; uniform float uStorm;
     varying vec3 vWorld;
     float ripple(vec2 p){
       vec2 w = vec2(vnoise(p*0.33), vnoise(p*0.33 + vec2(5.2, 1.3))) - 0.5;
@@ -896,10 +928,12 @@ const terrainMat = new THREE.ShaderMaterial({
       float flat_ = 1.0 - smoothstep(0.12, 0.34, slope);
       float rf = (1.0 - smoothstep(5.0, 42.0, dist)) * flat_;
       vec2 g = vec2(0.0);
+      float rip = 0.5;   // ripple height: 0 in a trough, 1 on a crest, 0.5 where the sand is smooth
       if (rf > 0.01){
         const float re = 0.03;
         float r0 = ripple(p.xz), r1 = ripple(p.xz + vec2(re, 0.0)), r2 = ripple(p.xz + vec2(0.0, re));
         g += vec2(r1 - r0, r2 - r0) * (0.013 / re) * rf * (0.45 + 0.55*prof);
+        rip = mix(0.5, r0, rf);
       }
       float mf = (1.0 - smoothstep(25.0, 260.0, dist)) * flat_ * smoothstep(0.35, 0.75, vnoise(p.xz*0.02 + 7.0));
       if (mf > 0.01){
@@ -942,8 +976,12 @@ const terrainMat = new THREE.ShaderMaterial({
       vec3 sandA = vec3(0.55, 0.26, 0.105);
       vec3 sandB = vec3(0.78, 0.46, 0.22);
       vec3 alb = mix(sandA, sandB, smoothstep(0.05, 0.95, prof));
+      // mineral provinces a few hundred metres across: iron-red sand grading into paler quartz
+      float province = vnoise(p.xz*0.0017 + vec2(21.0, 4.0));
+      alb *= mix(vec3(1.07, 0.95, 0.82), vec3(0.96, 1.02, 1.08), smoothstep(0.25, 0.75, province));
       alb *= 0.88 + 0.18*streak + 0.1*(patchN - 0.5);
       alb = mix(alb, alb*vec3(1.06, 1.0, 0.92), smoothstep(0.35, 0.6, slope));
+      alb *= 1.0 + (rip - 0.5)*0.18;   // ripple crests catch the paler grains
       if (dist < 8.0) alb *= 1.0 + (vnoise(p.xz*95.0) - 0.5)*0.22*(1.0 - smoothstep(2.0, 8.0, dist));
 
       vec3 L = uKeyDir;
@@ -955,16 +993,18 @@ const terrainMat = new THREE.ShaderMaterial({
       } else sh = 0.0;
       if (L.y > 0.03 && sh > 0.0){
         vec2 cq = p.xz + L.xz * (CLOUD_ALT - p.y) / L.y;
-        sh *= 1.0 - 0.62*cloudDensity(cq, uTime, uWind);
+        sh *= 1.0 - 0.62*texture2D(uCloudSh, (cq - uCloudShO.xy) / uCloudShO.z + 0.5).r;
       }
-      float diff = clamp(NdL, 0.0, 1.0);
-      diff = mix(diff, sqrt(diff), 0.22);
+      // rough diffuse (Oren-Nayar, sigma about 0.6): powdery sand holds its brightness toward the
+      // terminator and glows when you look down-sun, instead of shading like a smooth ball
+      float NdV = max(dot(Nd, V), 0.001);
+      float sON = dot(L, V) - NdL*NdV;
+      float diff = clamp(NdL, 0.0, 1.0) * max(0.74 + 0.36*sON / (sON > 0.0 ? max(max(NdL, NdV), 0.05) : 1.0), 0.0);
 
       vec3 H = normalize(L + V);
       float NdH = max(dot(Nd, H), 0.0);
-      float NdV = max(dot(Nd, V), 0.001);
       float fres = 0.04 + 0.96*pow(1.0 - NdV, 5.0);
-      float spec = pow(NdH, 28.0) * fres * 0.9;
+      float spec = (pow(NdH, 28.0)*0.9 + pow(NdH, 5.0)*0.2) * fres;   // tight glint over a broad grazing sheen
 
       float glit = 0.0;
       if (dist < 26.0){
@@ -980,10 +1020,26 @@ const terrainMat = new THREE.ShaderMaterial({
       // back-lit forward scatter on crests (looking toward the light)
       float fwd = pow(max(dot(-V, L), 0.0), 8.0) * smoothstep(0.6, 1.0, prof) * 0.25;
 
-      vec3 amb = mix(uAmbGround, uAmbSky, Nd.y*0.5 + 0.5);
-      float ao = (0.72 + 0.28*smoothstep(0.0, 0.55, prof)) * (1.0 - 0.3*trodden);
+      // sky light from above, plus warm light bounced off the sunlit sand into whatever lies in shadow
+      vec3 amb = mix(uAmbGround, uAmbSky, Nd.y*0.5 + 0.5) + uAmbGround * (1.0 - sh) * 0.7;
+      float ao = (0.72 + 0.28*smoothstep(0.0, 0.55, prof)) * (1.0 - 0.3*trodden) * (0.8 + 0.4*rip);
       alb *= mix(1.0, 0.9, trodden);
       vec3 col = alb * (uKeyColor * (diff + fwd) * sh + amb * ao) + uKeyColor * sh * (spec * vec3(1.0, 0.85, 0.7) + glit);
+
+      // sand snakes: in a gust, thin sheets of grains stream over the surface, meandering downwind
+      float gustK = clamp(smoothstep(0.6, 1.25, uGust) + uStorm, 0.0, 1.0);
+      if (gustK > 0.01 && dist < 260.0){
+        vec2 wd = normalize(uWind.xz), sp = vec2(dot(p.xz, wd), dot(p.xz, vec2(-wd.y, wd.x)));
+        float ta = uTime*6.0;
+        float me = (vnoise(vec2(sp.x*0.04 - ta*0.03, sp.y*0.05)) - 0.5)*5.0;
+        float sa = vnoise(vec2((sp.x - ta)*0.06, (sp.y + me)*1.5));
+        float sb = vnoise(vec2((sp.x - ta*1.5)*0.16, (sp.y + me)*4.2 + 7.0));
+        float env = smoothstep(0.42, 0.75, vnoise(vec2((sp.x - ta*0.7)*0.011, sp.y*0.017)));
+        float expo = mix(0.25, 1.0, smoothstep(-0.04, 0.2, -dot(N.xz, wd)));   // windward faces and crests, not the sheltered lee
+        float sn = smoothstep(0.5, 0.85, sa) * (0.35 + 0.65*sb) * env * expo * gustK * (1.0 - smoothstep(120.0, 260.0, dist)) * smoothstep(0.5, 3.0, dist);
+        vec3 veil = vec3(0.86, 0.6, 0.36) * (uKeyColor * sh * (0.55 + 0.9*pow(max(dot(-V, L), 0.0), 4.0)) + amb*1.2);
+        col = mix(col, veil, sn*0.45);
+      }
 
       col = applyHaze(col, p, 1.0);
       float edge = smoothstep(uGridR*0.5, uGridR*0.9, length(p.xz - cameraPosition.xz));
@@ -991,8 +1047,7 @@ const terrainMat = new THREE.ShaderMaterial({
       gl_FragColor = vec4(col, 1.0);
     }`,
 });
-const terrain = new THREE.Mesh(buildTerrainGeometry(), terrainMat);
-terrain.frustumCulled = false;
+const terrain = buildTerrain(terrainMat);
 scene.add(terrain);
 
 /* =====================================================================
@@ -3324,6 +3379,25 @@ const finalMat = new THREE.ShaderMaterial({
   depthTest: false, depthWrite: false,
 });
 
+const cloudShMat = new THREE.ShaderMaterial({
+  uniforms: { uTime: SH.uTime, uWind: SH.uWind, uCloudCover: SH.uCloudCover, uCloudShO: CLOUD_SH_UNI.uCloudShO },
+  vertexShader: FSQ_VERT,
+  fragmentShader: NOISE_GLSL + CLOUD_GLSL + /* glsl */`
+    uniform float uTime; uniform vec3 uWind; uniform vec3 uCloudShO; varying vec2 vUv;
+    void main(){ gl_FragColor = vec4(cloudDensity(uCloudShO.xy + (vUv - 0.5)*uCloudShO.z, uTime, uWind)); }`,
+  depthTest: false, depthWrite: false,
+});
+let cloudShTick = 0;
+function updateCloudShadow() {
+  const L = SH.uKeyDir.value;
+  if (L.y <= 0.03) return;
+  const k = (CLOUD_ALT - camera.position.y) / L.y, o = CLOUD_SH_UNI.uCloudShO.value;
+  const cx = Math.round((camera.position.x + L.x * k) / 512) * 512, cz = Math.round((camera.position.z + L.z * k) / 512) * 512;
+  // the clouds drift about a texel in two seconds, so a refresh every fourth frame is invisible
+  if (cx === o.x && cz === o.y && (cloudShTick++ & 3)) return;
+  o.x = cx; o.y = cz;
+  runPass(cloudShMat, cloudShRT);
+}
 const heightGenMat = new THREE.ShaderMaterial({
   uniforms: { uHM: SHADOW_UNI.uHM },
   vertexShader: FSQ_VERT,
@@ -3486,9 +3560,13 @@ function makeTargets() {
   const ow = Math.max(2, Math.floor(innerWidth * disp)), oh = Math.max(2, Math.floor(innerHeight * disp));
   const w = Math.max(2, Math.floor(ow * renderScale * adaptiveScale));
   const h = Math.max(2, Math.floor(oh * renderScale * adaptiveScale));
-  if (taaA) { taaA.dispose(); taaB.dispose(); }
-  taaA = new THREE.WebGLRenderTarget(ow, oh, rtOpts); taaB = new THREE.WebGLRenderTarget(ow, oh, rtOpts);
-  taa.reset = true;
+  // the history lives at display resolution, so it survives the governor changing the internal one
+  // (no flash of raw, jittered pixels each time the resolution steps)
+  if (!taaA || taaA.width !== ow || taaA.height !== oh) {
+    if (taaA) { taaA.dispose(); taaB.dispose(); }
+    taaA = new THREE.WebGLRenderTarget(ow, oh, rtOpts); taaB = new THREE.WebGLRenderTarget(ow, oh, rtOpts);
+    taa.reset = true;
+  }
   if (sceneRT) { sceneRT.dispose(); sceneRT.depthTexture.dispose(); }
   const depthTexture = new THREE.DepthTexture(w, h);
   depthTexture.type = THREE.UnsignedIntType;
@@ -3516,12 +3594,12 @@ function makeTargets() {
    Time of day — palette keyframes (linear RGB)
    ===================================================================== */
 const PAL = [
-  { e: -14, zen: [0.0025, 0.004, 0.012], hor: [0.008, 0.009, 0.017], sun: [0, 0, 0], exp: 2.7 },
+  { e: -14, zen: [0.0025, 0.004, 0.012], hor: [0.008, 0.009, 0.017], sun: [0, 0, 0], exp: 3.0 },
   { e: -5, zen: [0.008, 0.012, 0.032], hor: [0.05, 0.03, 0.035], sun: [0, 0, 0], exp: 2.1 },
   { e: 1, zen: [0.02, 0.032, 0.075], hor: [0.48, 0.2, 0.08], sun: [2.4, 0.85, 0.28], exp: 1.3 },
-  { e: 8, zen: [0.032, 0.058, 0.13], hor: [0.58, 0.31, 0.15], sun: [3.1, 1.75, 0.85], exp: 1.0 },
-  { e: 22, zen: [0.05, 0.09, 0.18], hor: [0.62, 0.43, 0.28], sun: [3.5, 2.5, 1.55], exp: 0.88 },
-  { e: 70, zen: [0.07, 0.12, 0.23], hor: [0.68, 0.55, 0.41], sun: [3.8, 3.15, 2.35], exp: 0.8 },
+  { e: 8, zen: [0.032, 0.058, 0.13], hor: [0.58, 0.31, 0.15], sun: [3.1, 1.75, 0.85], exp: 0.86 },
+  { e: 22, zen: [0.05, 0.09, 0.18], hor: [0.62, 0.43, 0.28], sun: [3.0, 2.15, 1.35], exp: 0.64 },
+  { e: 70, zen: [0.07, 0.12, 0.23], hor: [0.68, 0.55, 0.41], sun: [2.7, 2.3, 1.75], exp: 0.46 },
 ];
 const tod = { t: 0.66, exposure: 1, name: '' };
 // Weather: clear → a storm builds on the horizon → it engulfs the walker → it clears
@@ -3581,7 +3659,7 @@ function applyTimeOfDay(t) {
   SH.uHorizon.value.copy(p.hor);
   // key light: the sun, handing over to light reflected from the gas giant at night
   const w = smooth(-3, 1.5, el);
-  const planetShine = new V3(0.05, 0.065, 0.1);
+  const planetShine = new V3(0.07, 0.095, 0.155);
   SH.uKeyDir.value.copy(BODIES.gg.dir).lerp(sunDir, w).normalize();
   SH.uKeyColor.value.copy(planetShine).multiplyScalar(1 - w).addScaledVector(p.sun, w);
   const amb = p.zen.clone().multiplyScalar(1.1).addScaledVector(p.hor, 0.3);
@@ -4242,13 +4320,16 @@ function updateWorm(dt, t) {
   SH.uWormB.value.z = 0;
   {
     const S = W.scars || [];
+    let live = 0;
     for (let i = 0; i < 20; i++) {
       const sc = S[i], u = SH.uScar.value[i];
       if (!sc) { u.z = 0; SCAR_JS[i] = u; continue; }
       const age = t - sc.born;
       u.set(sc.x, sc.z, 2.4 * smooth(0, 3, age) * smooth(150, 40, age), 0);
       SCAR_JS[i] = u;
+      if (u.z > 0) live = i + 1;
     }
+    SH.uScarN.value = live;   // the shaders stop at the last live scar
   }
   W.noise = Math.max(0, W.noise + dt * ((hero.run > 0.5 ? 1.0 : hero.speed > 0.5 ? 0.04 : 0) - 0.03));
   W.shake = damp(W.shake, 0, 1.5, dt);
@@ -4456,7 +4537,9 @@ function render(dt, t) {
   renderer.info.reset();
   gpuPoll();
   const gq = gpuBegin();
-  terrainMat.uniforms.uGridOrigin.value.set(Math.floor(camera.position.x / GRID_STEP) * GRID_STEP, Math.floor(camera.position.z / GRID_STEP) * GRID_STEP);
+  const gridO = terrainMat.uniforms.uGridOrigin.value.set(Math.floor(camera.position.x / GRID_STEP) * GRID_STEP, Math.floor(camera.position.z / GRID_STEP) * GRID_STEP);
+  terrain.position.set(gridO.x, hero.groundY, gridO.y);   // only moves the sectors' culling bounds; the shader places the vertices
+  updateCloudShadow();
   streakMat.uniforms.uCenter.value.copy(hero.pos);
   flowMat.uniforms.uCenter.value.copy(hero.pos);
   moteMat.uniforms.uCenter.value.copy(camera.position); moteMat.uniforms.uGroundY.value = hero.groundY;
@@ -4590,7 +4673,7 @@ function tick(now) {
 
 // handle for in-browser inspection (harmless for viewers)
 window.__dd = { terrainH, death, thumper, plantThumper: () => plantThumper(clockT), sandFlow, carryall, convoy2: null, flyby, frigate, convoy, worm, thopters, spice, DEVILS, cam, hero, SHOTS, ui, look, applyTimeOfDay, wormState, terrain, plumes, streaks, motes, puffs, footprints, sky, renderer, perf, SH, finalMat, tod, scene, get clockT() { return clockT; }, get sceneRT() { return sceneRT; }, carry, dbgPause, weather, deform, startWorm: (k) => startWorm(k, clockT),
-  step(n = 60, dt = 1 / 30) { for (let i = 0; i < n; i++) { clockT += dt; updateWorld(dt, clockT); updateCamera(dt, clockT); } updateEnv(); envBuiltFor = tod.t; envDirty = false; render(dt, clockT); }, setScale(v) { renderScale = v; adaptiveScale = 1; makeTargets(); } };
+  step(n = 60, dt = 1 / 30) { for (let i = 0; i < n; i++) { clockT += dt; updateWorld(dt, clockT); updateCamera(dt, clockT); } updateEnv(); envBuiltFor = tod.t; envDirty = false; render(dt, clockT); }, setScale(v) { renderScale = v; adaptiveScale = 1; makeTargets(); }, draw() { render(1 / 60, clockT); } };
 
 /* =====================================================================
    Boot
